@@ -1,26 +1,118 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ─── Design tokens ──────────────────────────────────────────── */
+@theme {
+  --color-base:       #272727;
+  --color-surface-1:  #303030;
+  --color-surface-2:  #3B3B3B;
+  --color-border:     rgba(255,255,255,0.06);
+  --color-border-md:  rgba(255,255,255,0.10);
+  --color-accent:     #FFCC00;
+  --color-accent-dim: rgba(255,204,0,0.12);
+  --color-text-1:     #FFFFFF;
+  --color-text-2:     #BDBDBD;
+  --color-text-3:     rgba(255,255,255,0.35);
+  --font-sans: 'Urbanist', system-ui, sans-serif;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+/* ─── Base ───────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+html { height: 100%; }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: #272727;
+  color: #FFFFFF;
+  font-family: 'Urbanist', system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100%;
+}
+
+/* ─── Broad light→dark remapping ────────────────────────────── */
+/* These let existing pages pick up the dark theme without
+   touching every single Tailwind class individually. */
+
+.bg-white          { background-color: #303030 !important; }
+.bg-neutral-50     { background-color: #272727 !important; }
+.bg-neutral-100    { background-color: #3B3B3B !important; }
+.bg-neutral-200    { background-color: rgba(255,255,255,0.08) !important; }
+
+.text-neutral-900  { color: #FFFFFF !important; }
+.text-neutral-800  { color: #FFFFFF !important; }
+.text-neutral-700  { color: #FFFFFF !important; }
+.text-neutral-600  { color: #BDBDBD !important; }
+.text-neutral-500  { color: #BDBDBD !important; }
+.text-neutral-400  { color: rgba(255,255,255,0.4) !important; }
+.text-neutral-300  { color: rgba(255,255,255,0.28) !important; }
+
+.border-neutral-100 { border-color: rgba(255,255,255,0.05) !important; }
+.border-neutral-200 { border-color: rgba(255,255,255,0.08) !important; }
+.border-neutral-300 { border-color: rgba(255,255,255,0.12) !important; }
+
+.divide-neutral-100 > * + * { border-color: rgba(255,255,255,0.05) !important; }
+.divide-neutral-200 > * + * { border-color: rgba(255,255,255,0.08) !important; }
+
+/* Hover variants */
+.hover\:bg-neutral-100:hover { background-color: #3B3B3B !important; }
+.hover\:bg-neutral-50:hover  { background-color: #303030 !important; }
+
+/* ─── Form elements ──────────────────────────────────────────── */
+input, textarea, select {
+  background-color: #3B3B3B;
+  color: #FFFFFF;
+  border-color: rgba(255,255,255,0.10);
+}
+
+input::placeholder, textarea::placeholder {
+  color: rgba(255,255,255,0.3);
+}
+
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: rgba(255,255,255,0.25);
+}
+
+option { background-color: #303030; color: #FFFFFF; }
+
+/* ─── Scrollbar ──────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #272727; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+/* ─── Focus ring ─────────────────────────────────────────────── */
+:focus-visible { outline: 2px solid rgba(255,204,0,0.6); outline-offset: 2px; }
+
+/* ─── Selection ──────────────────────────────────────────────── */
+::selection { background: rgba(255,204,0,0.25); color: #FFFFFF; }
+
+/* ─── Hover helpers (replaces JS onMouseEnter/Leave in server components) ── */
+.card-hover {
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+.card-hover:hover {
+  background-color: #3B3B3B !important;
+  transform: translateY(-1px);
+}
+.row-hover:hover {
+  background-color: #3B3B3B !important;
+}
+.link-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: #303030;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 12px;
+  padding: 14px 16px;
+  font-size: 14px;
+  color: #FFFFFF;
+  text-decoration: none;
+  transition: background-color 0.15s ease;
+}
+.link-card:hover {
+  background-color: #3B3B3B;
 }

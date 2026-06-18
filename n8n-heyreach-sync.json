@@ -1,0 +1,172 @@
+{
+  "name": "HeyReach Sync → Discord + Attio",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 30 }]
+        }
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000001",
+      "name": "Svakih 30 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [180, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://app.lead-agents.com/api/heyreach/sync/a17542a3-369e-498c-b1a6-3c826276c783",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-sync-secret",
+              "value": "7egsJrdH6MQoSOJSp9THdmP0FVOZGCnkRuQuHZDVWkQ"
+            }
+          ]
+        },
+        "options": { "timeout": 120000 }
+      },
+      "id": "a1b2c3d4-0002-0002-0002-000000000002",
+      "name": "Sync iz HeyReach-a",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "check-changes",
+              "leftValue": "={{ $json.changes.length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "a1b2c3d4-0003-0003-0003-000000000003",
+      "name": "Ima promena?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [620, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const changes = $input.first().json.changes ?? [];\n\nconst EMOJI = { connected: '🤝', replied: '💬', declined: '❌' };\nconst COLOR = { connected: 5763719, replied: 3447003, declined: 15158332 };\n\nconst embeds = changes.map(c => ({\n  color: COLOR[c.event] ?? 9807270,\n  author: { name: c.campaign_name ?? 'Lead Agents' },\n  title: `${EMOJI[c.event] ?? '•'} ${c.person_name}`,\n  description: [\n    c.title ? `*${c.title}*` : null,\n    c.company_name ? `🏢 ${c.company_name}` : null,\n    c.event === 'connected' ? 'Prihvatio/la konekciju na LinkedIn-u.' : null,\n    c.event === 'replied'   ? '💡 Odgovorio/la — odgovori što pre!' : null,\n    c.event === 'declined'  ? 'Odbio/la konekciju.' : null,\n  ].filter(Boolean).join('\\n'),\n  url: c.linkedin_url,\n  footer: { text: `Lead Agents OS · ${new Date().toLocaleString('sr-Latn-RS')}` },\n}));\n\n// Discord allows max 10 embeds per message\nconst chunks = [];\nfor (let i = 0; i < embeds.length; i += 10) chunks.push(embeds.slice(i, i + 10));\n\nreturn chunks.map((group, i) => ({\n  json: {\n    discord_payload: {\n      username: 'Lead Agents OS',\n      embeds: group,\n    },\n    changes,\n    chunk_index: i,\n  }\n}));"
+      },
+      "id": "a1b2c3d4-0004-0004-0004-000000000004",
+      "name": "Formatiraj poruke",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [840, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/1517284522587062425/SRXUJ91X1b4ToRzgB3dmOqm5-LBDp9--X99GIbYF28vXjla_Q_BCdGj0yDd37jbxjaEr",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json.discord_payload) }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0005-0005-0005-000000000005",
+      "name": "Pošalji u Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1060, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Flatten changes into individual items for Attio (skip declined)\nconst changes = $input.first().json.changes ?? [];\nreturn changes\n  .filter(c => c.event !== 'declined')\n  .map(c => ({ json: c }));"
+      },
+      "id": "a1b2c3d4-0006-0006-0006-000000000006",
+      "name": "Po osobi za Attio",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [840, 420]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "https://api.attio.com/v2/objects/people/records",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer dd13e599dd223dd1a4b62b02b049e12b21f32941806202215d1cb34600430a43"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({\n  matching_attribute: 'linkedin',\n  data: {\n    values: {\n      name: [{\n        first_name: $json.person_name.split(' ')[0] ?? '',\n        last_name: $json.person_name.split(' ').slice(1).join(' ') ?? ''\n      }],\n      linkedin: [{ value: $json.linkedin_url }],\n      job_title: $json.title ? [{ value: $json.title }] : [],\n    }\n  }\n}) }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0007-0007-0007-000000000007",
+      "name": "Attio — Upsert Person",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1060, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.attio.com/v2/notes",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer dd13e599dd223dd1a4b62b02b049e12b21f32941806202215d1cb34600430a43"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({\n  data: {\n    parent_object: 'people',\n    parent_record_id: $('Attio — Upsert Person').item.json.data.id.record_id,\n    title: $('Po osobi za Attio').item.json.event === 'replied' ? '💬 LinkedIn odgovor' : '🤝 LinkedIn konekcija',\n    content: [\n      $('Po osobi za Attio').item.json.event === 'replied'\n        ? `Odgovorio/la na LinkedIn outreach u kampanji \"${$('Po osobi za Attio').item.json.campaign_name ?? ''}\".`\n        : `Prihvatio/la konekciju u kampanji \"${$('Po osobi za Attio').item.json.campaign_name ?? ''}\".`,\n      $('Po osobi za Attio').item.json.title        ? `Pozicija: ${$('Po osobi za Attio').item.json.title}`        : null,\n      $('Po osobi za Attio').item.json.company_name ? `Firma: ${$('Po osobi za Attio').item.json.company_name}` : null,\n    ].filter(Boolean).join('\\n')\n  }\n}) }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0008-0008-0008-000000000008",
+      "name": "Attio — Dodaj belešku",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1280, 420]
+    }
+  ],
+  "connections": {
+    "Svakih 30 min": {
+      "main": [[{ "node": "Sync iz HeyReach-a", "type": "main", "index": 0 }]]
+    },
+    "Sync iz HeyReach-a": {
+      "main": [[{ "node": "Ima promena?", "type": "main", "index": 0 }]]
+    },
+    "Ima promena?": {
+      "main": [
+        [{ "node": "Formatiraj poruke", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Formatiraj poruke": {
+      "main": [[
+        { "node": "Pošalji u Discord",   "type": "main", "index": 0 },
+        { "node": "Po osobi za Attio",   "type": "main", "index": 0 }
+      ]]
+    },
+    "Pošalji u Discord": { "main": [[]] },
+    "Po osobi za Attio": {
+      "main": [[{ "node": "Attio — Upsert Person", "type": "main", "index": 0 }]]
+    },
+    "Attio — Upsert Person": {
+      "main": [[{ "node": "Attio — Dodaj belešku", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "staticData": null,
+  "meta": { "templateCredsSetupCompleted": true }
+}
