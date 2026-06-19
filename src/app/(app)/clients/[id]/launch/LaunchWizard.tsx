@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createLaunchCampaign, createLaunchAudience, attachLaunchAudience, type LaunchStepInput } from "@/app/actions/launch";
@@ -81,6 +81,37 @@ function Err({ msg }: { msg: string | null }) {
   return <p style={{ fontSize: "13px", color: "#F87171", marginTop: "12px", padding: "8px 12px", backgroundColor: "rgba(248,113,113,0.08)", borderRadius: "8px" }}>{msg}</p>;
 }
 
+function PipelineProgress({ processed, total }: { processed: number; total: number }) {
+  const pct = total > 0 ? Math.min(processed / total, 1) : 0;
+  const r = 36;
+  const circ = 2 * Math.PI * r; // ≈ 226
+  const dash = pct * circ;
+
+  return (
+    <svg width="88" height="88" viewBox="0 0 88 88" style={{ flexShrink: 0 }}>
+      {/* Track */}
+      <circle cx="44" cy="44" r={r} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="8" />
+      {/* Progress arc */}
+      <circle
+        cx="44" cy="44" r={r} fill="none"
+        stroke={pct >= 1 ? "#86EFAC" : "#A5B4FC"}
+        strokeWidth="8"
+        strokeLinecap="round"
+        strokeDasharray={`${dash} ${circ}`}
+        transform="rotate(-90 44 44)"
+        style={{ transition: "stroke-dasharray 0.4s ease, stroke 0.3s" }}
+      />
+      {/* Label */}
+      <text x="44" y="40" textAnchor="middle" fontSize="15" fontWeight="700" fill="#FFFFFF">
+        {Math.round(pct * 100)}%
+      </text>
+      <text x="44" y="55" textAnchor="middle" fontSize="9.5" fill="rgba(255,255,255,0.45)">
+        {pct >= 1 ? "gotovo" : "obrada"}
+      </text>
+    </svg>
+  );
+}
+
 export default function LaunchWizard({ clientId, campaigns, senders, icps, audiences }: {
   clientId: string; campaigns: Campaign[]; senders: Sender[]; icps: Icp[]; audiences: Audience[];
 }) {
@@ -119,6 +150,8 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
 
   // Step 3 — pipeline
   const [pipeResult, setPipeResult] = useState<{ qualified: number; disqualified: number; noData: number } | null>(null);
+  const [progress, setProgress] = useState<{ total: number; processed: number } | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const resolvedCampaign = campaigns.find((c) => c.id === campaignId);
   const resolvedSender = senders.find((s) => s.id === senderId);
@@ -244,15 +277,40 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
 
   async function runPipeline() {
     setError(null);
+    setProgress(null);
     setBusy(true);
+
+    // Poll progress every 2.5s while pipeline runs
+    pollRef.current = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/pipeline/${audienceId}/progress`);
+        if (r.ok) {
+          const d = await r.json();
+          setProgress({ total: d.total ?? 0, processed: d.processed ?? 0 });
+        }
+      } catch { /* ignore poll errors */ }
+    }, 2500);
+
     try {
       const res = await fetch(`/api/pipeline/${audienceId}/start`, { method: "POST" });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error ?? "Obrada nije uspela.");
+      let body: any;
+      try {
+        body = await res.json();
+      } catch {
+        const text = await res.text().catch(() => "");
+        throw new Error(text.slice(0, 300) || `HTTP ${res.status} — obrada nije uspela (verovatno timeout).`);
+      }
+      if (!res.ok) throw new Error(body?.error ?? "Obrada nije uspela.");
       setPipeResult({ qualified: body.qualified ?? 0, disqualified: body.disqualified ?? 0, noData: body.noData ?? 0 });
     } catch (e: any) {
       setError(e.message);
     } finally {
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      // Final progress fetch after completion
+      try {
+        const r = await fetch(`/api/pipeline/${audienceId}/progress`);
+        if (r.ok) { const d = await r.json(); setProgress({ total: d.total ?? 0, processed: d.total ?? 0 }); }
+      } catch { /* ignore */ }
       setBusy(false);
     }
   }
@@ -542,10 +600,27 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
           </p>
 
           {!pipeResult ? (
-            <button onClick={runPipeline} disabled={busy}
-              style={{ backgroundColor: "#A5B4FC", color: "#272727", fontWeight: 600, borderRadius: "10px", padding: "11px 22px", fontSize: "14px", border: "none", cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.6 : 1 }}>
-              {busy ? "Obrađujem… (može potrajati par minuta)" : "▶ Pokreni obradu"}
-            </button>
+            <div style={{ display: "flex", flexDirection: "column", gap: "20px", alignItems: "flex-start" }}>
+              <button onClick={runPipeline} disabled={busy}
+                style={{ backgroundColor: "#A5B4FC", color: "#272727", fontWeight: 600, borderRadius: "10px", padding: "11px 22px", fontSize: "14px", border: "none", cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.6 : 1 }}>
+                {busy ? "Obrađujem…" : "▶ Pokreni obradu"}
+              </button>
+              {busy && (
+                <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
+                  <PipelineProgress processed={progress?.processed ?? 0} total={progress?.total ?? (audienceCount ?? 0)} />
+                  <div>
+                    <p style={{ fontSize: "14px", color: "#FFFFFF", fontWeight: 600, margin: 0 }}>
+                      {progress
+                        ? `${progress.processed} od ${progress.total} leadova`
+                        : "Priprema…"}
+                    </p>
+                    <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.4)", marginTop: "4px" }}>
+                      Enrichment + AI kvalifikacija. Može potrajati par minuta.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
           ) : (
             <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
               <div style={{ flex: 1, minWidth: "120px", backgroundColor: "rgba(134,239,172,0.08)", border: "1px solid rgba(134,239,172,0.2)", borderRadius: "12px", padding: "14px" }}>
