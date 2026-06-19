@@ -33,17 +33,15 @@ export async function POST(
   const icp = audience.icp_profiles as any;
   const owner = (audience as any).sender_profiles?.full_name ?? null;
 
-  // Load pending members
+  // Atomically claim pending members (concurrency guard — see migration 0011).
+  // A second concurrent invocation (e.g. gateway retry) gets a disjoint set or
+  // none, so the same lead is never enriched/scored twice.
   const { data: members, error: memErr } = await supabase
-    .from("audience_members")
-    .select("id, raw")
-    .eq("audience_id", audienceId)
-    .eq("qualify_status", "pending")
-    .order("id");
+    .rpc("claim_pending_members", { p_audience_id: audienceId });
 
   if (memErr) return NextResponse.json({ error: memErr.message }, { status: 500 });
   if (!members || members.length === 0) {
-    return NextResponse.json({ message: "No pending members." });
+    return NextResponse.json({ message: "No pending members.", qualified: 0, disqualified: 0, noData: 0 });
   }
 
   // Dedup: fetch contacted_history for this client, build match sets
