@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createLaunchCampaign, createLaunchAudience, attachLaunchAudience, type LaunchStepInput } from "@/app/actions/launch";
@@ -153,6 +153,8 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
   const [progress, setProgress] = useState<{ total: number; processed: number } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
   const resolvedCampaign = campaigns.find((c) => c.id === campaignId);
   const resolvedSender = senders.find((s) => s.id === senderId);
 
@@ -280,39 +282,67 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
     setProgress(null);
     setBusy(true);
 
-    // Poll progress every 2.5s while pipeline runs
-    pollRef.current = setInterval(async () => {
-      try {
-        const r = await fetch(`/api/pipeline/${audienceId}/progress`);
-        if (r.ok) {
-          const d = await r.json();
-          setProgress({ total: d.total ?? 0, processed: d.processed ?? 0 });
-        }
-      } catch { /* ignore poll errors */ }
-    }, 2500);
-
-    try {
-      const res = await fetch(`/api/pipeline/${audienceId}/start`, { method: "POST" });
-      let body: any;
-      try {
-        body = await res.json();
-      } catch {
-        const text = await res.text().catch(() => "");
-        throw new Error(text.slice(0, 300) || `HTTP ${res.status} — obrada nije uspela (verovatno timeout).`);
-      }
-      if (!res.ok) throw new Error(body?.error ?? "Obrada nije uspela.");
-      setPipeResult({ qualified: body.qualified ?? 0, disqualified: body.disqualified ?? 0, noData: body.noData ?? 0 });
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
+    let settled = false;
+    const finish = (q: number, d: number, n: number) => {
+      if (settled) return;
+      settled = true;
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-      // Final progress fetch after completion
+      setPipeResult({ qualified: q, disqualified: d, noData: n });
+      setBusy(false);
+    };
+
+    // Fire the work. The serverless function keeps running even if the
+    // gateway drops our connection (long enrichment), so a rejection here is
+    // NOT fatal — polling below is the source of truth for completion.
+    fetch(`/api/pipeline/${audienceId}/start`, { method: "POST" })
+      .then(async (res) => {
+        const body = await res.json().catch(() => null);
+        if (res.ok && body && typeof body.qualified === "number") {
+          finish(body.qualified, body.disqualified ?? 0, body.noData ?? 0);
+        }
+      })
+      .catch(() => { /* connection dropped — polling will detect completion */ });
+
+    // Poll progress until every member is processed (pending === 0).
+    let stalls = 0;
+    let lastProcessed = -1;
+    const poll = async () => {
       try {
         const r = await fetch(`/api/pipeline/${audienceId}/progress`);
-        if (r.ok) { const d = await r.json(); setProgress({ total: d.total ?? 0, processed: d.total ?? 0 }); }
-      } catch { /* ignore */ }
-      setBusy(false);
-    }
+        if (!r.ok) return;
+        const d = await r.json();
+        const total = d.total ?? 0;
+        const processed = d.processed ?? 0;
+        setProgress({ total, processed });
+
+        // Done: all members have a final status
+        if (total > 0 && (d.pending ?? 0) === 0) {
+          finish(d.qualified ?? 0, d.disqualified ?? 0, d.noData ?? 0);
+          return;
+        }
+
+        // Stall detection: no movement for ~40s likely means a server timeout
+        // cut the run short (Vercel hobby caps functions at 60s).
+        if (processed === lastProcessed) {
+          stalls++;
+          if (stalls >= 16 && !settled) {
+            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+            settled = true;
+            setBusy(false);
+            setError(
+              `Obrada je stala na ${processed}/${total} leadova (verovatno serverski timeout). ` +
+              `Već obrađeni su sačuvani — klikni "Pokreni obradu" ponovo da nastaviš sa preostalima.`
+            );
+          }
+        } else {
+          stalls = 0;
+          lastProcessed = processed;
+        }
+      } catch { /* ignore individual poll errors */ }
+    };
+
+    await poll(); // immediate first read
+    pollRef.current = setInterval(poll, 2500);
   }
 
   return (
