@@ -38,9 +38,13 @@ interface Props {
   campaigns: Campaign[];
   icpProfiles: IcpProfile[];
   initialSearches: PastSearch[];
+  // wizard mode: campaign + ICP pre-chosen; report imported audience back up
+  fixedCampaignId?: string;
+  fixedIcpId?: string;
+  onImported?: (audienceId: string, importedTotal: number) => void;
 }
 
-export default function ApolloSearchClient({ clientId, campaigns, icpProfiles, initialSearches }: Props) {
+export default function ApolloSearchClient({ clientId, campaigns, icpProfiles, initialSearches, fixedCampaignId, fixedIcpId, onImported }: Props) {
   const [searches, setSearches] = useState<PastSearch[]>(initialSearches);
   const [lastResult, setLastResult] = useState<SearchResult | null>(null);
   const [continueId, setContinueId] = useState<string | null>(null);
@@ -49,6 +53,7 @@ export default function ApolloSearchClient({ clientId, campaigns, icpProfiles, i
   function handleResult(result: SearchResult) {
     setLastResult(result);
     setContinueId(result.search_id);
+    if (onImported && result.audience_id) onImported(result.audience_id, result.leads_imported_total);
     // Refresh the search in the list
     setSearches(prev => {
       const existing = prev.find(s => s.id === result.search_id);
@@ -170,6 +175,8 @@ export default function ApolloSearchClient({ clientId, campaigns, icpProfiles, i
             icpProfiles={icpProfiles}
             existingSearchId={activeSearch.id}
             existingName={activeSearch.name ?? undefined}
+            fixedCampaignId={fixedCampaignId}
+            fixedIcpId={fixedIcpId}
             onResult={handleResult}
           />
         </div>
@@ -183,6 +190,8 @@ export default function ApolloSearchClient({ clientId, campaigns, icpProfiles, i
             clientId={clientId}
             campaigns={campaigns}
             icpProfiles={icpProfiles}
+            fixedCampaignId={fixedCampaignId}
+            fixedIcpId={fixedIcpId}
             onResult={handleResult}
           />
         </div>

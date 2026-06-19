@@ -14,6 +14,9 @@ interface Props {
   // if provided, this is a "continue" run
   existingSearchId?: string;
   existingName?: string;
+  // wizard mode: campaign + ICP are pre-chosen upstream, hide the selectors
+  fixedCampaignId?: string;
+  fixedIcpId?: string;
 }
 
 interface SearchResult {
@@ -118,14 +121,14 @@ function FieldHint({ children }: { children: React.ReactNode }) {
   );
 }
 
-export default function ApolloSearchForm({ clientId, campaigns, icpProfiles, onResult, existingSearchId, existingName }: Props) {
+export default function ApolloSearchForm({ clientId, campaigns, icpProfiles, onResult, existingSearchId, existingName, fixedCampaignId, fixedIcpId }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Filter state
   const [name, setName] = useState(existingName ?? "");
-  const [campaignId, setCampaignId] = useState("");
-  const [icpId, setIcpId] = useState(icpProfiles.find(i => i.is_default)?.id ?? "");
+  const [campaignId, setCampaignId] = useState(fixedCampaignId ?? "");
+  const [icpId, setIcpId] = useState(fixedIcpId ?? icpProfiles.find(i => i.is_default)?.id ?? "");
   const [titles, setTitles] = useState<string[]>([""]);
   const [includeSimilar, setIncludeSimilar] = useState(true);
   const [seniorities, setSeniorities] = useState<string[]>([]);
@@ -238,7 +241,7 @@ export default function ApolloSearchForm({ clientId, campaigns, icpProfiles, onR
             </FieldHint>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-3" style={{ display: fixedCampaignId ? "none" : undefined }}>
             <div>
               <label className="block text-xs font-medium text-zinc-400 mb-1">Kampanja</label>
               <select

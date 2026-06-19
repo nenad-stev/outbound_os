@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createLaunchCampaign, createLaunchAudience, attachLaunchAudience, type LaunchStepInput } from "@/app/actions/launch";
 import type { PersonalizationLevel, SequenceChannel } from "@/lib/types";
+import ApolloSearchClient from "../audiences/apollo/ApolloSearchClient";
 
 interface Campaign { id: string; name: string; heyreach_campaign_id: string | null; sender_profile_id: string | null; step_count: number }
 interface Sender { id: string; name: string; heyreach_account_id: string | null }
@@ -105,7 +106,7 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
   const [icpId, setIcpId] = useState<string>(icps.find((i) => i.is_default)?.id ?? icps[0]?.id ?? "");
 
   // Step 2 — audience
-  const [audMode, setAudMode] = useState<"csv" | "existing">("csv");
+  const [audMode, setAudMode] = useState<"csv" | "apollo" | "existing">("csv");
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [existingAudienceId, setExistingAudienceId] = useState(audiences[0]?.id ?? "");
   const [audienceId, setAudienceId] = useState<string>("");
@@ -161,8 +162,21 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
     setStep(2);
   }
 
+  // Apollo import happens inside the embedded UI; wire sender then record the audience.
+  async function onApolloImported(importedAudienceId: string, importedTotal: number) {
+    setError(null);
+    await attachLaunchAudience(importedAudienceId, campaignId, senderId, icpId);
+    setAudienceId(importedAudienceId);
+    setAudienceCount(importedTotal);
+  }
+
   async function submitStep2() {
     setError(null);
+    if (audMode === "apollo") {
+      if (!audienceId) { setError("Importuj bar jedan Apollo search pre nego nastaviš."); return; }
+      setStep(3);
+      return;
+    }
     if (audMode === "existing") {
       if (!existingAudienceId) { setError("Izaberi publiku."); return; }
       setBusy(true);
@@ -354,11 +368,11 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
         <div style={cardStyle}>
           <h2 style={{ fontSize: "18px", fontWeight: 700, color: "#FFFFFF", marginBottom: "4px" }}>3. Publika</h2>
           <p style={{ fontSize: "13px", color: "rgba(255,255,255,0.5)", marginBottom: "18px" }}>
-            Uvezi nove leadove (CSV) ili izaberi već importovanu publiku.
+            Uvezi nove leadove (CSV ili Apollo) ili izaberi već importovanu publiku.
           </p>
 
           <div style={{ display: "flex", gap: "8px", marginBottom: "18px" }}>
-            {(["csv", "existing"] as const).map((m) => (
+            {(["csv", "apollo", "existing"] as const).map((m) => (
               <button key={m} onClick={() => setAudMode(m)}
                 disabled={m === "existing" && audiences.length === 0}
                 style={{
@@ -368,22 +382,45 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
                   border: audMode === m ? "1px solid #FFCC00" : "1px solid rgba(255,255,255,0.1)",
                   opacity: m === "existing" && audiences.length === 0 ? 0.4 : 1,
                 }}>
-                {m === "csv" ? "Upload CSV" : "Postojeća publika"}
+                {m === "csv" ? "Upload CSV" : m === "apollo" ? "Apollo search" : "Postojeća publika"}
               </button>
             ))}
           </div>
 
-          {audMode === "csv" ? (
+          {audMode === "csv" && (
             <div>
               <label style={labelStyle}>CSV fajl (Apollo ili LGM export)</label>
               <input type="file" accept=".csv" onChange={(e) => setCsvFile(e.target.files?.[0] ?? null)}
                 style={{ ...inputStyle, padding: "8px" }} />
               {csvFile && <p style={{ fontSize: "12px", color: "#86EFAC", marginTop: "8px" }}>✓ {csvFile.name}</p>}
-              <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.3)", marginTop: "10px" }}>
-                Za Apollo pretragu: <Link href={`/clients/${clientId}/audiences/apollo`} target="_blank" style={{ color: "#FFCC00" }}>otvori Apollo search →</Link>, sačuvaj publiku pa se vrati i izaberi „Postojeća publika".
-              </p>
             </div>
-          ) : (
+          )}
+
+          {audMode === "apollo" && (
+            <div>
+              <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)", marginBottom: "12px" }}>
+                Pretraži Apollo i importuj direktno u ovu kampanju (kampanja i ICP su već izabrani). Možeš pokrenuti više searcheva.
+              </p>
+              {audienceId && (
+                <p style={{ fontSize: "12px", color: "#86EFAC", marginBottom: "12px", padding: "8px 12px", backgroundColor: "rgba(134,239,172,0.08)", borderRadius: "8px" }}>
+                  ✓ Importovano {audienceCount ?? 0} leadova — možeš nastaviti ili pokrenuti još searcheva.
+                </p>
+              )}
+              <div style={{ backgroundColor: "rgba(0,0,0,0.2)", borderRadius: "12px", padding: "16px", border: "1px solid rgba(255,255,255,0.06)" }}>
+                <ApolloSearchClient
+                  clientId={clientId}
+                  campaigns={campaigns.map((c) => ({ id: c.id, name: c.name, sender_name: null }))}
+                  icpProfiles={icps}
+                  initialSearches={[]}
+                  fixedCampaignId={campaignId}
+                  fixedIcpId={icpId}
+                  onImported={onApolloImported}
+                />
+              </div>
+            </div>
+          )}
+
+          {audMode === "existing" && (
             <div>
               <label style={labelStyle}>Publika</label>
               <select value={existingAudienceId} onChange={(e) => setExistingAudienceId(e.target.value)} style={inputStyle}>
@@ -396,7 +433,9 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
           )}
 
           <Err msg={error} />
-          <NavButtons onBack={() => setStep(1)} onNext={submitStep2} nextLabel="Uvezi i nastavi →" busy={busy} />
+          <NavButtons onBack={() => setStep(1)} onNext={submitStep2}
+            nextLabel={audMode === "apollo" ? "Dalje: obrada →" : "Uvezi i nastavi →"}
+            nextDisabled={audMode === "apollo" && !audienceId} busy={busy} />
         </div>
       )}
 
