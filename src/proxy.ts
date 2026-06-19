@@ -2,9 +2,10 @@ import { NextResponse, type NextRequest } from "next/server";
 import { updateSession } from "@/lib/supabase/middleware";
 
 export async function proxy(request: NextRequest) {
-  // Allow internal sync/import calls with a pre-shared secret to bypass auth
+  // Allow internal sync/import + n8n callback calls with a pre-shared secret to
+  // bypass auth.
   const path = request.nextUrl.pathname;
-  if (path.startsWith("/api/heyreach/")) {
+  if (path.startsWith("/api/heyreach/") || path.startsWith("/api/content/")) {
     const secret = request.headers.get("x-sync-secret");
     if (secret && secret === process.env.SYNC_SECRET) {
       return NextResponse.next();

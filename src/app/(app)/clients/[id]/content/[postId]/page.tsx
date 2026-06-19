@@ -43,6 +43,7 @@ export default async function PostDetailPage({
     .select(`
       id, post_type, status, source, topic, content, slides, image_prompt,
       generated_image_url, inspiration_texts, notes, generated_at, published_at, created_at,
+      scheduled_at, linkedin_post_url,
       impressions, likes, comments, shares,
       sender_profiles(id, full_name, linkedin_url),
       content_pillars(name, description)

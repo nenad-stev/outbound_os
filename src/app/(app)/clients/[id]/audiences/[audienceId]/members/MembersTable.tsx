@@ -2,6 +2,7 @@
 
 import { Fragment, useState } from "react";
 import { renderTemplateSegments } from "@/lib/message-preview";
+import { downloadCsv } from "@/lib/csv-export";
 
 interface SequenceStep {
   step_order: number;
@@ -205,14 +206,37 @@ export default function MembersTable({
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
 
+  function exportCsv() {
+    downloadCsv(`leads-export-${new Date().toISOString().slice(0, 10)}.csv`, members);
+  }
+
   return (
-    <div
-      style={{
-        borderRadius: "16px",
-        overflow: "hidden",
-        border: "1px solid rgba(255,255,255,0.06)",
-      }}
-    >
+    <>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "12px" }}>
+        <button
+          onClick={exportCsv}
+          disabled={members.length === 0}
+          style={{
+            backgroundColor: members.length === 0 ? "rgba(255,255,255,0.06)" : "#FFCC00",
+            color: members.length === 0 ? "rgba(255,255,255,0.3)" : "#272727",
+            fontWeight: 600,
+            borderRadius: "10px",
+            padding: "8px 16px",
+            fontSize: "13px",
+            border: "none",
+            cursor: members.length === 0 ? "not-allowed" : "pointer",
+          }}
+        >
+          ⬇ Export CSV ({members.length})
+        </button>
+      </div>
+      <div
+        style={{
+          borderRadius: "16px",
+          overflow: "hidden",
+          border: "1px solid rgba(255,255,255,0.06)",
+        }}
+      >
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", minWidth: "900px" }}>
           <thead>
@@ -597,6 +621,7 @@ export default function MembersTable({
           No leads match the selected filter.
         </p>
       )}
-    </div>
+      </div>
+    </>
   );
 }

@@ -1,7 +1,9 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { setMemberReviewStatus, bulkSetReviewStatus } from "@/app/actions/review";
+import { useRouter } from "next/navigation";
+import { setMemberReviewStatus, bulkSetReviewStatus, updateMemberPersonalization } from "@/app/actions/review";
+import { downloadCsv } from "@/lib/csv-export";
 
 interface Lead {
   id: string;
@@ -61,10 +63,21 @@ function LeadCard({
   const accentColor = PRIORITY_ACCENT[priority] ?? "rgba(255,255,255,0.35)";
   const borderColor = PRIORITY_BORDER[priority] ?? "rgba(255,255,255,0.06)";
 
+  const [msg, setMsg] = useState(r.personalization ?? "");
+  const [editing, setEditing] = useState(false);
+  const [savingMsg, setSavingMsg] = useState(false);
+
   function toggle(status: "approved" | "rejected") {
     startTransition(() =>
       setMemberReviewStatus(lead.id, status, clientId, lead.audience_id)
     );
+  }
+
+  async function saveMsg() {
+    setSavingMsg(true);
+    await updateMemberPersonalization(lead.id, msg, clientId, lead.audience_id);
+    setSavingMsg(false);
+    setEditing(false);
   }
 
   return (
@@ -81,7 +94,7 @@ function LeadCard({
         {/* Content */}
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px" }}>
-            <div>
+            <div style={{ minWidth: 0, flex: 1 }}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
                 <span style={{ fontWeight: 600, color: "#FFFFFF", fontSize: "14px" }}>{name}</span>
                 {r.linkedin_url && (
@@ -94,7 +107,7 @@ function LeadCard({
                   </span>
                 )}
               </div>
-              <p style={{ fontSize: "13px", color: "#BDBDBD", marginTop: "2px" }}>
+              <p style={{ fontSize: "13px", color: "#BDBDBD", marginTop: "2px", overflowWrap: "anywhere" }}>
                 {[r.title, r.company_name].filter(Boolean).join(" @ ")}
                 {r.company_domain && <span style={{ marginLeft: "4px", fontFamily: "monospace", fontSize: "11px", color: "rgba(255,255,255,0.35)" }}>({r.company_domain})</span>}
               </p>
@@ -135,13 +148,43 @@ function LeadCard({
             </p>
           )}
 
-          {/* Personalization */}
-          {r.personalization && (
-            <div style={{ marginTop: "8px", display: "flex", alignItems: "flex-start", gap: "6px" }}>
-              <span style={{ fontSize: "11px", color: "rgba(255,255,255,0.35)", flexShrink: 0, marginTop: "2px" }}>Personalizacija:</span>
-              <p style={{ fontSize: "12px", color: "#BDBDBD", fontStyle: "italic" }}>{r.personalization}</p>
+          {/* Outgoing message (personalization custom variable pushed to HeyReach) */}
+          <div style={{ marginTop: "10px", backgroundColor: "rgba(165,180,252,0.06)", border: "1px solid rgba(165,180,252,0.15)", borderRadius: "10px", padding: "10px 12px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", marginBottom: "4px" }}>
+              <span style={{ fontSize: "11px", fontWeight: 600, color: "#A5B4FC" }}>Poruka koja ide u HeyReach</span>
+              {!editing && (
+                <button onClick={() => setEditing(true)}
+                  style={{ fontSize: "11px", color: "#A5B4FC", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+                  Izmeni
+                </button>
+              )}
             </div>
-          )}
+            {editing ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                <textarea
+                  value={msg}
+                  onChange={(e) => setMsg(e.target.value)}
+                  rows={3}
+                  placeholder="Tekst koji se ubacuje na mesto {personalization}…"
+                  style={{ backgroundColor: "#272727", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "8px", color: "#FFFFFF", padding: "8px 10px", fontSize: "12px", width: "100%", outline: "none", resize: "vertical", lineHeight: 1.5 }}
+                />
+                <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                  <button onClick={saveMsg} disabled={savingMsg}
+                    style={{ backgroundColor: "#FFCC00", color: "#272727", fontWeight: 600, borderRadius: "8px", padding: "5px 12px", fontSize: "12px", border: "none", cursor: savingMsg ? "not-allowed" : "pointer", opacity: savingMsg ? 0.6 : 1 }}>
+                    {savingMsg ? "Čuvam…" : "Sačuvaj"}
+                  </button>
+                  <button onClick={() => { setMsg(r.personalization ?? ""); setEditing(false); }}
+                    style={{ fontSize: "12px", color: "rgba(255,255,255,0.4)", background: "none", border: "none", cursor: "pointer" }}>
+                    Otkaži
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p style={{ fontSize: "12px", color: msg ? "#E0E0E0" : "rgba(255,255,255,0.3)", fontStyle: msg ? "normal" : "italic", whiteSpace: "pre-wrap", margin: 0, lineHeight: 1.5 }}>
+                {msg || "Nema poruke — klikni Izmeni ili regeneriši batch."}
+              </p>
+            )}
+          </div>
 
           {/* Qualify reason */}
           {lead.qualify_reason && (
@@ -160,16 +203,43 @@ export default function ReviewQueue({
   clientId,
   audienceId,
   campaignName,
+  initialTemplate,
 }: {
   leads: Lead[];
   clientId: string;
   audienceId: string;
   campaignName: string;
+  initialTemplate: string;
 }) {
+  const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [tab, setTab] = useState<"all" | "pending" | "approved" | "rejected">("all");
   const [isPending, startTransition] = useTransition();
   const [pushStatus, setPushStatus] = useState<string | null>(null);
+
+  // Batch message regeneration
+  const [showRegen, setShowRegen] = useState(false);
+  const [template, setTemplate] = useState(initialTemplate);
+  const [regenScope, setRegenScope] = useState<"all" | "pending" | "approved">("all");
+  const [regenStatus, setRegenStatus] = useState<string | null>(null);
+
+  async function regenerateMessages() {
+    if (!template.trim()) { setRegenStatus("✗ Upiši template."); return; }
+    setRegenStatus("regen");
+    try {
+      const res = await fetch(`/api/review/${audienceId}/regenerate-messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ template, scope: regenScope }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? "Regeneracija nije uspela.");
+      setRegenStatus(`✓ Regenerisano ${body.updated} poruka${body.failed ? `, ${body.failed} neuspelih` : ""}`);
+      router.refresh();
+    } catch (e: any) {
+      setRegenStatus(`✗ ${e.message}`);
+    }
+  }
 
   const filtered = leads.filter((l) => tab === "all" || l.review_status === tab);
   const approvedCount = leads.filter((l) => l.review_status === "approved").length;
@@ -198,6 +268,10 @@ export default function ReviewQueue({
       await bulkSetReviewStatus(ids, status, clientId, audienceId);
       setSelected(new Set());
     });
+  }
+
+  function exportCsv() {
+    downloadCsv(`review-${tab}-${new Date().toISOString().slice(0, 10)}.csv`, filtered);
   }
 
   async function pushToHeyReach() {
@@ -239,6 +313,13 @@ export default function ReviewQueue({
               </button>
             </>
           )}
+          <button
+            onClick={exportCsv}
+            disabled={filtered.length === 0}
+            style={{ backgroundColor: "transparent", border: "1px solid rgba(255,255,255,0.12)", color: filtered.length === 0 ? "rgba(255,255,255,0.25)" : "#BDBDBD", borderRadius: "10px", padding: "8px 16px", fontSize: "13px", cursor: filtered.length === 0 ? "not-allowed" : "pointer" }}
+          >
+            ⬇ Export CSV ({filtered.length})
+          </button>
           {approvedCount > 0 && (
             <button
               onClick={pushToHeyReach}
@@ -256,6 +337,59 @@ export default function ReviewQueue({
           {pushStatus}
         </p>
       )}
+
+      {/* Batch message regeneration */}
+      <div style={{ marginBottom: "16px", backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "12px", padding: "12px 14px" }}>
+        <button
+          onClick={() => setShowRegen((v) => !v)}
+          style={{ display: "flex", alignItems: "center", gap: "8px", background: "none", border: "none", cursor: "pointer", padding: 0, width: "100%", textAlign: "left" }}
+        >
+          <span style={{ fontSize: "13px", fontWeight: 600, color: "#FFFFFF" }}>Regeneriši poruke za batch</span>
+          <span style={{ fontSize: "11px", color: "rgba(255,255,255,0.35)" }}>
+            AI ispisuje novu {"{personalization}"} po leadu iz tvog template-a
+          </span>
+          <span style={{ marginLeft: "auto", fontSize: "11px", color: "rgba(255,255,255,0.35)", transform: showRegen ? "rotate(180deg)" : "none" }}>▾</span>
+        </button>
+
+        {showRegen && (
+          <div style={{ marginTop: "12px", display: "flex", flexDirection: "column", gap: "10px" }}>
+            <textarea
+              value={template}
+              onChange={(e) => setTemplate(e.target.value)}
+              rows={4}
+              placeholder="Npr: Napiši ležeran 1-liner koji referencira njihovu poziciju i industriju, bez prodaje, kao da pišeš kolegi."
+              style={{ backgroundColor: "#272727", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "8px", color: "#FFFFFF", padding: "10px 12px", fontSize: "13px", width: "100%", outline: "none", resize: "vertical", lineHeight: 1.5 }}
+            />
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+              <label style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)", display: "flex", alignItems: "center", gap: "6px" }}>
+                Za:
+                <select
+                  value={regenScope}
+                  onChange={(e) => setRegenScope(e.target.value as any)}
+                  style={{ backgroundColor: "#272727", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "8px", color: "#FFFFFF", padding: "6px 10px", fontSize: "12px", outline: "none" }}
+                >
+                  <option value="all">sve qualified ({leads.length})</option>
+                  <option value="pending">samo na čekanju ({pendingCount})</option>
+                  <option value="approved">samo approved ({approvedCount})</option>
+                </select>
+              </label>
+              <button
+                onClick={regenerateMessages}
+                disabled={regenStatus === "regen"}
+                style={{ backgroundColor: "#A5B4FC", color: "#272727", fontWeight: 600, borderRadius: "10px", padding: "8px 16px", fontSize: "13px", border: "none", cursor: regenStatus === "regen" ? "not-allowed" : "pointer", opacity: regenStatus === "regen" ? 0.6 : 1 }}
+              >
+                {regenStatus === "regen" ? "Generišem… (može potrajati)" : "Regeneriši poruke"}
+              </button>
+              {regenStatus && regenStatus !== "regen" && (
+                <span style={{ fontSize: "12px", color: regenStatus.startsWith("✓") ? "#86EFAC" : "#F87171" }}>{regenStatus}</span>
+              )}
+            </div>
+            <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.3)", margin: 0 }}>
+              Prepisuje postojeće poruke za izabrani skup. Veliki batch-evi mogu zahtevati ponovni klik ako istekne vreme.
+            </p>
+          </div>
+        )}
+      </div>
 
       {/* Tabs */}
       <div style={{ marginBottom: "16px", display: "flex", gap: "8px", alignItems: "center" }}>

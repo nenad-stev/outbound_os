@@ -116,3 +116,42 @@ option { background-color: #303030; color: #FFFFFF; }
 .link-card:hover {
   background-color: #3B3B3B;
 }
+
+/* ─── Category cards (client overview) ───────────────────────── */
+.cat-card {
+  display: block;
+  background-color: #303030;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 14px;
+  padding: 16px;
+  text-decoration: none;
+  transition: background-color 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+}
+.cat-card:hover {
+  background-color: #363636;
+  border-color: rgba(255,255,255,0.12);
+  transform: translateY(-2px);
+}
+
+/* ─── Client sub-nav tabs ────────────────────────────────────── */
+.client-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.55);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.client-tab:hover {
+  background-color: rgba(255,255,255,0.05);
+  color: #FFFFFF;
+}
+.client-tab[data-active="true"] {
+  background-color: rgba(255,204,0,0.14);
+  color: #FFCC00;
+}

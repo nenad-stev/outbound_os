@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { approvePost, archivePost, markPublished, updatePostContent } from "@/app/actions/content";
+import { approvePost, archivePost, markPublished, updatePostContent, schedulePost, cancelSchedule } from "@/app/actions/content";
 import { savePostAnalytics } from "@/app/actions/analytics";
 
 interface Slide {
@@ -14,7 +14,7 @@ interface Slide {
 interface Post {
   id: string;
   post_type: "text" | "image" | "carousel";
-  status: "draft" | "approved" | "published" | "archived";
+  status: "draft" | "approved" | "scheduled" | "published" | "archived";
   source: string;
   topic: string | null;
   content: string | null;
@@ -22,6 +22,8 @@ interface Post {
   image_prompt: string | null;
   generated_image_url: string | null;
   notes: string | null;
+  scheduled_at: string | null;
+  linkedin_post_url: string | null;
   impressions: number;
   likes: number;
   comments: number;
@@ -48,6 +50,7 @@ function statusBadge(status: string): React.CSSProperties {
   const map: Record<string, React.CSSProperties> = {
     draft:     { backgroundColor: "rgba(255,255,255,0.08)", color: "#BDBDBD" },
     approved:  { backgroundColor: "rgba(255,204,0,0.15)", color: "#FFCC00" },
+    scheduled: { backgroundColor: "rgba(99,102,241,0.15)", color: "#A5B4FC" },
     published: { backgroundColor: "rgba(134,239,172,0.12)", color: "#86EFAC" },
     archived:  { backgroundColor: "rgba(239,68,68,0.08)", color: "#F87171" },
   };
@@ -57,9 +60,25 @@ function statusBadge(status: string): React.CSSProperties {
 const STATUS_LABEL: Record<string, string> = {
   draft: "Draft",
   approved: "Odobreno",
+  scheduled: "Zakazano",
   published: "Objavljeno",
   archived: "Arhivirano",
 };
+
+// "2026-06-20T09:00" in local time, for a datetime-local default (now + 1h).
+function defaultScheduleValue(): string {
+  const d = new Date(Date.now() + 60 * 60 * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function fmtSchedule(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("sr-RS", {
+    weekday: "short", day: "2-digit", month: "2-digit",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
 
 export default function PostEditor({ post, clientId }: Props) {
   const router = useRouter();
@@ -77,6 +96,36 @@ export default function PostEditor({ post, clientId }: Props) {
   const [shares, setShares]           = useState(post.shares      ?? 0);
   const [savingAnalytics, setSavingAnalytics] = useState(false);
   const [savedAnalytics, setSavedAnalytics]   = useState(false);
+  const [scheduledInput, setScheduledInput] = useState(defaultScheduleValue());
+  const [scheduling, setScheduling] = useState(false);
+  const [scheduleMsg, setScheduleMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  async function handleSchedule() {
+    setScheduling(true);
+    setScheduleMsg(null);
+    const fd = new FormData();
+    fd.set("post_id", post.id);
+    fd.set("client_id", clientId);
+    fd.set("content", content);
+    fd.set("scheduled_at", scheduledInput);
+    const res = await schedulePost(fd);
+    setScheduling(false);
+    if (res.ok) {
+      setScheduleMsg({ ok: true, text: "Zakazano ✓" });
+      router.refresh();
+    } else {
+      setScheduleMsg({ ok: false, text: res.error ?? "Zakazivanje nije uspelo." });
+    }
+  }
+
+  async function handleCancelSchedule() {
+    const fd = new FormData();
+    fd.set("post_id", post.id);
+    fd.set("client_id", clientId);
+    await cancelSchedule(fd);
+    setScheduleMsg(null);
+    router.refresh();
+  }
 
   function updateSlide(i: number, field: keyof Slide, val: string) {
     setSlides((prev) => prev.map((s, idx) => idx === i ? { ...s, [field]: val } : s));
@@ -310,6 +359,64 @@ export default function PostEditor({ post, clientId }: Props) {
         {saved && (
           <span style={{ fontSize: "13px", color: "#86EFAC" }}>Sačuvano ✓</span>
         )}
+      </div>
+
+      {/* Scheduling section */}
+      <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: "24px", marginTop: "8px" }}>
+        <p style={{ fontSize: "11px", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: "rgba(255,255,255,0.35)", marginBottom: "16px" }}>
+          Zakaži objavu na LinkedIn
+        </p>
+
+        {post.post_type !== "text" ? (
+          <p style={{ fontSize: "13px", color: "rgba(255,255,255,0.4)" }}>
+            Automatska objava za sada podržava samo tekst postove. Za {post.post_type === "image" ? "image" : "carousel"} postove označi ručno kao objavljeno.
+          </p>
+        ) : post.status === "scheduled" ? (
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "12px" }}>
+            <span style={{ fontSize: "14px", color: "#A5B4FC" }}>
+              Zakazano za <strong>{fmtSchedule(post.scheduled_at)}</strong>
+            </span>
+            <button
+              type="button"
+              onClick={handleCancelSchedule}
+              style={{ backgroundColor: "transparent", border: "1px solid rgba(239,68,68,0.3)", color: "#F87171", borderRadius: "10px", padding: "6px 14px", fontSize: "12px", cursor: "pointer" }}
+            >
+              Otkaži zakazivanje
+            </button>
+          </div>
+        ) : post.status === "published" ? (
+          <div style={{ fontSize: "13px", color: "#86EFAC" }}>
+            Objavljeno{post.linkedin_post_url ? (
+              <> · <a href={post.linkedin_post_url} target="_blank" rel="noopener noreferrer" style={{ color: "#FFCC00", textDecoration: "none" }}>Vidi post →</a></>
+            ) : null}
+          </div>
+        ) : (post.status === "draft" || post.status === "approved") ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "12px" }}>
+              <input
+                type="datetime-local"
+                value={scheduledInput}
+                min={defaultScheduleValue()}
+                onChange={(e) => setScheduledInput(e.target.value)}
+                style={{ ...inputStyle, width: "auto", colorScheme: "dark" }}
+              />
+              <button
+                type="button"
+                onClick={handleSchedule}
+                disabled={scheduling}
+                style={{ backgroundColor: "#6366F1", color: "#FFFFFF", fontWeight: 600, borderRadius: "12px", padding: "10px 20px", fontSize: "14px", border: "none", cursor: scheduling ? "not-allowed" : "pointer", opacity: scheduling ? 0.6 : 1 }}
+              >
+                {scheduling ? "Zakazujem…" : "Zakaži objavu"}
+              </button>
+            </div>
+            <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.35)" }}>
+              n8n će objaviti tekst posta na LinkedIn nalogu identityja u zakazano vreme. Trenutni sadržaj iz editora se snima i koristi.
+            </p>
+            {scheduleMsg && (
+              <span style={{ fontSize: "13px", color: scheduleMsg.ok ? "#86EFAC" : "#F87171" }}>{scheduleMsg.text}</span>
+            )}
+          </div>
+        ) : null}
       </div>
 
       {/* Analytics section */}

@@ -39,21 +39,39 @@ export default async function AudiencesPage({
 
       <div className="flex items-center justify-between" style={{ marginBottom: "8px" }}>
         <h1 className="text-3xl font-bold text-white">Audiences</h1>
-        <Link
-          href={`/clients/${id}/audiences/new`}
-          style={{
-            backgroundColor: "#FFCC00",
-            color: "#272727",
-            fontWeight: 600,
-            borderRadius: "12px",
-            padding: "10px 20px",
-            fontSize: "14px",
-            textDecoration: "none",
-            display: "inline-block",
-          }}
-        >
-          + Import
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link
+            href={`/clients/${id}/audiences/apollo`}
+            style={{
+              backgroundColor: "transparent",
+              color: "#FFCC00",
+              fontWeight: 600,
+              borderRadius: "12px",
+              padding: "10px 20px",
+              fontSize: "14px",
+              textDecoration: "none",
+              display: "inline-block",
+              border: "1.5px solid #FFCC00",
+            }}
+          >
+            Apollo Search
+          </Link>
+          <Link
+            href={`/clients/${id}/audiences/new`}
+            style={{
+              backgroundColor: "#FFCC00",
+              color: "#272727",
+              fontWeight: 600,
+              borderRadius: "12px",
+              padding: "10px 20px",
+              fontSize: "14px",
+              textDecoration: "none",
+              display: "inline-block",
+            }}
+          >
+            + Import CSV
+          </Link>
+        </div>
       </div>
 
       {audiences.length === 0 ? (

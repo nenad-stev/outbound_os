@@ -3,6 +3,22 @@ import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import ReviewQueue from "./ReviewQueue";
 
+function StatPill({ label, color, active }: { label: string; color: string; active: boolean }) {
+  return (
+    <span style={{
+      fontSize: "10px",
+      fontWeight: 500,
+      padding: "1px 7px",
+      borderRadius: "999px",
+      color: active ? "#272727" : color,
+      backgroundColor: active ? "rgba(0,0,0,0.10)" : "rgba(255,255,255,0.06)",
+      whiteSpace: "nowrap",
+    }}>
+      {label}
+    </span>
+  );
+}
+
 export default async function ClientReviewPage({
   params,
   searchParams,
@@ -18,7 +34,7 @@ export default async function ClientReviewPage({
     supabase.from("clients").select("id, name").eq("id", id).maybeSingle(),
     supabase
       .from("audiences")
-      .select("id, name, campaigns(name, heyreach_campaign_id), sender_profiles(heyreach_account_id)")
+      .select("id, name, source_meta, campaigns(name, heyreach_campaign_id), sender_profiles(heyreach_account_id)")
       .eq("client_id", id)
       .order("created_at", { ascending: false }),
   ]);
@@ -27,6 +43,25 @@ export default async function ClientReviewPage({
 
   const audiences = (audiencesData ?? []) as any[];
   const selectedAudience = audiences.find((a) => a.id === selectedAudienceId) ?? audiences[0];
+
+  // Per-audience qualified counts + review-status breakdown for the sidebar cards.
+  type Stat = { total: number; pending: number; approved: number; rejected: number; pushed: number };
+  const statsByAudience: Record<string, Stat> = {};
+  if (audiences.length) {
+    const { data: countRows } = await supabase
+      .from("audience_members")
+      .select("audience_id, review_status")
+      .in("audience_id", audiences.map((a) => a.id))
+      .eq("qualify_status", "qualified");
+    for (const row of (countRows ?? []) as any[]) {
+      const s = (statsByAudience[row.audience_id] ??= { total: 0, pending: 0, approved: 0, rejected: 0, pushed: 0 });
+      s.total++;
+      if (row.review_status === "approved") s.approved++;
+      else if (row.review_status === "rejected") s.rejected++;
+      else if (row.review_status === "pushed") s.pushed++;
+      else s.pending++;
+    }
+  }
 
   let leads: any[] = [];
   if (selectedAudience) {
@@ -64,24 +99,49 @@ export default async function ClientReviewPage({
           {/* Audience picker sidebar */}
           <div style={{ width: "224px", flexShrink: 0 }}>
             <p style={{ fontSize: "11px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "rgba(255,255,255,0.35)", marginBottom: "12px" }}>Audience</p>
-            <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-              {audiences.map((a) => (
-                <Link
-                  key={a.id}
-                  href={`/clients/${id}/review?audienceId=${a.id}`}
-                  style={selectedAudience?.id === a.id
-                    ? { backgroundColor: "#FFCC00", color: "#272727", borderRadius: "10px", padding: "10px 14px", fontSize: "13px", textDecoration: "none", display: "block", fontWeight: 600 }
-                    : { backgroundColor: "rgba(255,255,255,0.04)", color: "#BDBDBD", borderRadius: "10px", padding: "10px 14px", fontSize: "13px", textDecoration: "none", display: "block" }
-                  }
-                >
-                  {a.name}
-                  {a.campaigns?.name && (
-                    <p style={{ marginTop: "2px", fontSize: "11px", color: selectedAudience?.id === a.id ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.35)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", margin: "2px 0 0" }}>
-                      {a.campaigns.name}
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              {audiences.map((a) => {
+                const active = selectedAudience?.id === a.id;
+                const s = statsByAudience[a.id] ?? { total: 0, pending: 0, approved: 0, rejected: 0, pushed: 0 };
+                const muted = active ? "rgba(0,0,0,0.55)" : "rgba(255,255,255,0.4)";
+                return (
+                  <Link
+                    key={a.id}
+                    href={`/clients/${id}/review?audienceId=${a.id}`}
+                    style={{
+                      backgroundColor: active ? "#FFCC00" : "rgba(255,255,255,0.04)",
+                      color: active ? "#272727" : "#BDBDBD",
+                      borderRadius: "12px",
+                      padding: "12px 14px",
+                      textDecoration: "none",
+                      display: "block",
+                      border: active ? "1px solid #FFCC00" : "1px solid rgba(255,255,255,0.06)",
+                    }}
+                  >
+                    <p style={{ fontSize: "13px", fontWeight: 600, margin: 0, overflowWrap: "anywhere", lineHeight: 1.3 }}>
+                      {a.name}
                     </p>
-                  )}
-                </Link>
-              ))}
+                    {a.campaigns?.name && (
+                      <p style={{ marginTop: "3px", fontSize: "11px", color: muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", margin: "3px 0 0" }}>
+                        {a.campaigns.name}
+                      </p>
+                    )}
+                    <div style={{ marginTop: "8px", display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                      <span style={{ fontSize: "11px", fontWeight: 600, color: active ? "#272727" : "#FFFFFF" }}>
+                        {s.total} qualified
+                      </span>
+                      {s.total > 0 && (
+                        <span style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
+                          {s.pending > 0 && <StatPill active={active} color="#BDBDBD" label={`${s.pending} na čekanju`} />}
+                          {s.approved > 0 && <StatPill active={active} color="#86EFAC" label={`${s.approved} approved`} />}
+                          {s.pushed > 0 && <StatPill active={active} color="#A5B4FC" label={`${s.pushed} pushed`} />}
+                          {s.rejected > 0 && <StatPill active={active} color="#F87171" label={`${s.rejected} rejected`} />}
+                        </span>
+                      )}
+                    </div>
+                  </Link>
+                );
+              })}
             </div>
           </div>
 
@@ -107,6 +167,7 @@ export default async function ClientReviewPage({
                   clientId={id}
                   audienceId={selectedAudience.id}
                   campaignName={selectedAudience.campaigns?.name ?? selectedAudience.name}
+                  initialTemplate={(selectedAudience.source_meta as any)?.message_template ?? ""}
                 />
               )
             ) : null}
