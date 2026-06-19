@@ -75,7 +75,7 @@ export async function POST(
 
   let updated = 0;
   let failed = 0;
-  const CONCURRENCY = 5;
+  const CONCURRENCY = 3;
 
   for (let i = 0; i < members.length; i += CONCURRENCY) {
     const batch = members.slice(i, i + CONCURRENCY);

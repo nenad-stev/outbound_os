@@ -64,35 +64,60 @@ ${stepsBlock}
 
 Vrati SAMO JSON objekat gde je ključ broj poruke (kao string), a vrednost finalni tekst. Primer: {"1": "...", "2": "..."}`;
 
-  try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": anthropicKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: ANTHROPIC_MODEL,
-        max_tokens: 1200,
-        messages: [{ role: "user", content: prompt }],
-      }),
-      signal: AbortSignal.timeout(40_000),
-    });
-    if (!res.ok) return { ok: false, messages: {}, error: `Anthropic ${res.status}` };
-    const json = await res.json();
-    const text: string = json?.content?.[0]?.text ?? "{}";
-    const parsed = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
-    const messages: Record<string, string> = {};
-    for (const s of usable) {
-      const v = parsed[String(s.step_order)] ?? parsed[s.step_order];
-      if (typeof v === "string" && v.trim()) messages[String(s.step_order)] = v.trim();
+  // Up to 3 attempts — transient 429 (rate limit) / 5xx / timeout are the main
+  // reason a lead silently ends up without messages in a concurrent batch.
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  let lastErr = "Nepoznata greška.";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": anthropicKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: ANTHROPIC_MODEL,
+          max_tokens: 1200,
+          messages: [{ role: "user", content: prompt }],
+        }),
+        signal: AbortSignal.timeout(45_000),
+      });
+
+      if (!res.ok) {
+        lastErr = `Anthropic ${res.status}`;
+        // Retry on rate limit / server errors, honoring Retry-After when present.
+        if ((res.status === 429 || res.status >= 500) && attempt < 2) {
+          const ra = Number(res.headers.get("retry-after"));
+          await sleep(Number.isFinite(ra) && ra > 0 ? ra * 1000 : 1500 * (attempt + 1));
+          continue;
+        }
+        return { ok: false, messages: {}, error: lastErr };
+      }
+
+      const json = await res.json();
+      const text: string = json?.content?.[0]?.text ?? "{}";
+      const parsed = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+      const messages: Record<string, string> = {};
+      for (const s of usable) {
+        const v = parsed[String(s.step_order)] ?? parsed[s.step_order];
+        if (typeof v === "string" && v.trim()) messages[String(s.step_order)] = v.trim();
+      }
+      if (Object.keys(messages).length === 0) {
+        lastErr = "Prazan odgovor.";
+        if (attempt < 2) { await sleep(1200); continue; }
+        return { ok: false, messages: {}, error: lastErr };
+      }
+      return { ok: true, messages };
+    } catch (e) {
+      // Timeout / network — retry with backoff.
+      lastErr = e instanceof Error ? e.message : String(e);
+      if (attempt < 2) { await sleep(1500 * (attempt + 1)); continue; }
+      return { ok: false, messages: {}, error: lastErr };
     }
-    if (Object.keys(messages).length === 0) return { ok: false, messages: {}, error: "Prazan odgovor." };
-    return { ok: true, messages };
-  } catch (e) {
-    return { ok: false, messages: {}, error: e instanceof Error ? e.message : String(e) };
   }
+  return { ok: false, messages: {}, error: lastErr };
 }
 
 export async function generateMessage(

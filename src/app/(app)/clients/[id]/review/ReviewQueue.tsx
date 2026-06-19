@@ -133,6 +133,26 @@ function LeadCard({
   const rendered = r.rendered_messages ?? {};
   const required = requiredSteps(namedSteps);
 
+  const router = useRouter();
+  const [gen, setGen] = useState<string | null>(null);
+  async function generateOne() {
+    setGen("gen");
+    try {
+      const res = await fetch(`/api/review/${lead.audience_id}/regenerate-member`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ memberId: lead.id }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error ?? "Nije uspelo.");
+      setGen("✓ generisano");
+      setShowMsgs(true);
+      router.refresh();
+    } catch (e: any) {
+      setGen(`✗ ${e.message}`);
+    }
+  }
+
   const missingLinkedIn = !r.linkedin_url;
   const missingMsgs = leadMissingMessages(lead, namedSteps);
   const blockers: string[] = [];
@@ -217,14 +237,23 @@ function LeadCard({
           {/* Editable per-step messages (the text pushed to HeyReach per variable) */}
           {required.length > 0 ? (
             <div style={{ marginTop: "10px" }}>
-              <button onClick={() => setShowMsgs((v) => !v)}
-                style={{ display: "flex", alignItems: "center", gap: "8px", background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: "12px", fontWeight: 600, color: "#A5B4FC" }}>
-                <span>Poruke za ovog leada ({required.length})</span>
-                <span style={{ fontSize: "11px", color: missingMsgs ? "#F87171" : "rgba(255,255,255,0.35)" }}>
-                  {missingMsgs ? "⚠ neke nisu generisane" : "✓ spremno"}
-                </span>
-                <span style={{ display: "inline-block", transform: showMsgs ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>▾</span>
-              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+                <button onClick={() => setShowMsgs((v) => !v)}
+                  style={{ display: "flex", alignItems: "center", gap: "8px", background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: "12px", fontWeight: 600, color: "#A5B4FC" }}>
+                  <span>Poruke za ovog leada ({required.length})</span>
+                  <span style={{ fontSize: "11px", color: missingMsgs ? "#F87171" : "rgba(255,255,255,0.35)" }}>
+                    {missingMsgs ? "⚠ neke nisu generisane" : "✓ spremno"}
+                  </span>
+                  <span style={{ display: "inline-block", transform: showMsgs ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>▾</span>
+                </button>
+                <button onClick={generateOne} disabled={gen === "gen"}
+                  style={{ backgroundColor: gen === "gen" ? "rgba(255,255,255,0.08)" : "rgba(165,180,252,0.15)", color: gen === "gen" ? "rgba(255,255,255,0.4)" : "#A5B4FC", fontWeight: 600, borderRadius: "8px", padding: "4px 12px", fontSize: "11px", border: "1px solid rgba(165,180,252,0.3)", cursor: gen === "gen" ? "default" : "pointer" }}>
+                  {gen === "gen" ? "Generišem…" : missingMsgs ? "✨ Generiši poruke" : "↻ Regeneriši"}
+                </button>
+                {gen && gen !== "gen" && (
+                  <span style={{ fontSize: "11px", color: gen.startsWith("✓") ? "#86EFAC" : "#F87171" }}>{gen}</span>
+                )}
+              </div>
               {showMsgs && (
                 <div style={{ marginTop: "8px", display: "flex", flexDirection: "column", gap: "8px" }}>
                   {required.map((step) => (
