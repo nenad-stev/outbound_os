@@ -12,6 +12,12 @@ export async function POST(
   const { audienceId } = await params;
   const supabase = await createClient();
 
+  // Optional batch filter: only push active (A) or inactive (B) leads so the
+  // operator can prioritize active profiles into the HeyReach campaign first.
+  const reqBody = await _req.json().catch(() => ({}));
+  const batchFilter: "A" | "B" | null =
+    reqBody?.batch === "A" || reqBody?.batch === "B" ? reqBody.batch : null;
+
   // Load audience + campaign + sender profile
   const { data: audience, error: audErr } = await supabase
     .from("audiences")
@@ -62,11 +68,19 @@ export async function POST(
     return NextResponse.json({ pushed: 0, message: "Nema approved leadova za push." });
   }
 
+  // Apply batch filter (A = active, B = inactive) when requested.
+  const scopedMembers = batchFilter
+    ? members.filter((m) => (m.raw as any).outreach_batch === batchFilter)
+    : members;
+  if (scopedMembers.length === 0) {
+    return NextResponse.json({ pushed: 0, message: `Nema approved leadova u Batch ${batchFilter}.` });
+  }
+
   // Partition: only push leads that have what's needed. Skipped ones stay
   // "approved" so they can be fixed and re-pushed.
   const valid: typeof members = [];
   const skipped: { name: string; reason: string }[] = [];
-  for (const m of members) {
+  for (const m of scopedMembers) {
     const r = m.raw as any;
     const name = r.full_name || `${r.first_name ?? ""} ${r.last_name ?? ""}`.trim() || r.linkedin_url || "—";
     if (!r.linkedin_url) { skipped.push({ name, reason: "nema LinkedIn URL" }); continue; }

@@ -28,6 +28,12 @@ interface Lead {
     score_explanation?: string;
     personalization?: string;
     rendered_messages?: Record<string, string>;
+    outreach_batch?: "A" | "B";
+    linkedin?: {
+      connections?: number | null;
+      has_profile_photo?: boolean;
+      active_last_30_days?: boolean;
+    };
   };
 }
 
@@ -187,6 +193,17 @@ function LeadCard({
                     {r.fit_score}/100 · {priority.replace("_", " ").toUpperCase()}
                   </span>
                 )}
+                {r.outreach_batch && (
+                  <span title={r.outreach_batch === "A" ? "Aktivan na LinkedInu — prioritet za push" : "Neaktivan na LinkedInu"}
+                    style={{
+                      fontSize: "11px", fontWeight: 700, borderRadius: "999px", padding: "1px 8px",
+                      color: r.outreach_batch === "A" ? "#86EFAC" : "rgba(255,255,255,0.55)",
+                      backgroundColor: r.outreach_batch === "A" ? "rgba(134,239,172,0.12)" : "rgba(255,255,255,0.06)",
+                      border: r.outreach_batch === "A" ? "1px solid rgba(134,239,172,0.3)" : "1px solid rgba(255,255,255,0.12)",
+                    }}>
+                    {r.outreach_batch === "A" ? "⚡ Batch A · aktivan" : "Batch B"}
+                  </span>
+                )}
                 {blockers.length > 0 && (
                   <span title={`Push će preskočiti: ${blockers.join(", ")}`}
                     style={{ fontSize: "11px", fontWeight: 600, color: "#F87171", backgroundColor: "rgba(248,113,113,0.12)", border: "1px solid rgba(248,113,113,0.3)", borderRadius: "999px", padding: "1px 8px" }}>
@@ -337,6 +354,8 @@ export default function ReviewQueue({
   const filtered = leads.filter((l) => tab === "all" || l.review_status === tab);
   const approvedCount = leads.filter((l) => l.review_status === "approved").length;
   const pendingCount = leads.filter((l) => l.review_status === "pending").length;
+  const approvedA = leads.filter((l) => l.review_status === "approved" && l.raw.outreach_batch === "A").length;
+  const approvedB = leads.filter((l) => l.review_status === "approved" && l.raw.outreach_batch === "B").length;
 
   // Approved leads that would be skipped on push
   const approvedBlocked = leads.filter((l) => {
@@ -368,14 +387,20 @@ export default function ReviewQueue({
     downloadCsv(`review-${tab}-${new Date().toISOString().slice(0, 10)}.csv`, filtered);
   }
 
-  async function pushToHeyReach() {
-    setPushStatus("pushing");
+  async function pushToHeyReach(batch?: "A" | "B") {
+    setPushStatus(batch ? `pushing-${batch}` : "pushing");
     try {
-      const res = await fetch(`/api/heyreach/${audienceId}/push`, { method: "POST" });
+      const res = await fetch(`/api/heyreach/${audienceId}/push`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(batch ? { batch } : {}),
+      });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "Push failed.");
       const skipped = body.skipped as { name: string; reason: string }[] | undefined;
-      let txt = `✓ Pushed ${body.pushed} leadova u HeyReach`;
+      const label = batch ? `Batch ${batch}` : "leadova";
+      let txt = `✓ Pushed ${body.pushed} ${label} u HeyReach`;
+      if (body.pushed === 0 && body.message) txt = `ℹ ${body.message}`;
       if (skipped && skipped.length) {
         txt += ` · ${skipped.length} preskočeno (${skipped.slice(0, 3).map((s) => s.name).join(", ")}${skipped.length > 3 ? "…" : ""})`;
       }
@@ -421,18 +446,40 @@ export default function ReviewQueue({
             ⬇ Export CSV ({filtered.length})
           </button>
           {approvedCount > 0 && (
-            <button
-              onClick={pushToHeyReach}
-              disabled={pushStatus === "pushing"}
-              style={{ backgroundColor: "#FFCC00", color: "#272727", fontWeight: 600, borderRadius: "12px", padding: "10px 20px", fontSize: "14px", border: "none", cursor: pushStatus === "pushing" ? "not-allowed" : "pointer", opacity: pushStatus === "pushing" ? 0.6 : 1 }}
-            >
-              {pushStatus === "pushing" ? "Šaljem…" : `Push ${approvedCount} u HeyReach →`}
-            </button>
+            <>
+              {approvedA > 0 && (
+                <button
+                  onClick={() => pushToHeyReach("A")}
+                  disabled={pushStatus?.startsWith("pushing")}
+                  title="Aktivni na LinkedInu — prioritet"
+                  style={{ backgroundColor: "#86EFAC", color: "#272727", fontWeight: 600, borderRadius: "12px", padding: "10px 18px", fontSize: "14px", border: "none", cursor: pushStatus?.startsWith("pushing") ? "not-allowed" : "pointer", opacity: pushStatus?.startsWith("pushing") ? 0.6 : 1 }}
+                >
+                  {pushStatus === "pushing-A" ? "Šaljem…" : `⚡ Push Batch A (${approvedA}) →`}
+                </button>
+              )}
+              {approvedB > 0 && (
+                <button
+                  onClick={() => pushToHeyReach("B")}
+                  disabled={pushStatus?.startsWith("pushing")}
+                  title="Neaktivni na LinkedInu"
+                  style={{ backgroundColor: "rgba(255,255,255,0.1)", color: "#FFFFFF", fontWeight: 600, borderRadius: "12px", padding: "10px 18px", fontSize: "14px", border: "1px solid rgba(255,255,255,0.18)", cursor: pushStatus?.startsWith("pushing") ? "not-allowed" : "pointer", opacity: pushStatus?.startsWith("pushing") ? 0.6 : 1 }}
+                >
+                  {pushStatus === "pushing-B" ? "Šaljem…" : `Push Batch B (${approvedB}) →`}
+                </button>
+              )}
+              <button
+                onClick={() => pushToHeyReach()}
+                disabled={pushStatus?.startsWith("pushing")}
+                style={{ backgroundColor: "#FFCC00", color: "#272727", fontWeight: 600, borderRadius: "12px", padding: "10px 20px", fontSize: "14px", border: "none", cursor: pushStatus?.startsWith("pushing") ? "not-allowed" : "pointer", opacity: pushStatus?.startsWith("pushing") ? 0.6 : 1 }}
+              >
+                {pushStatus === "pushing" ? "Šaljem…" : `Push sve (${approvedCount}) →`}
+              </button>
+            </>
           )}
         </div>
       </div>
 
-      {pushStatus && pushStatus !== "pushing" && (
+      {pushStatus && !pushStatus.startsWith("pushing") && (
         <p style={{ marginBottom: "12px", borderRadius: "10px", padding: "10px 16px", fontSize: "13px", backgroundColor: pushStatus.startsWith("✓") ? "rgba(134,239,172,0.08)" : "rgba(239,68,68,0.08)", color: pushStatus.startsWith("✓") ? "#86EFAC" : "#F87171", border: pushStatus.startsWith("✓") ? "1px solid rgba(134,239,172,0.2)" : "1px solid rgba(239,68,68,0.2)" }}>
           {pushStatus}
         </p>

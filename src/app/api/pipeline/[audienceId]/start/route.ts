@@ -149,6 +149,40 @@ export async function POST(
       lifecycle: rawBase.lifecycle ?? emptyLifecycle(),
     };
 
+    // Hard LinkedIn gates (no AI cost) — only applied when we actually scraped
+    // the profile. Below 200 connections or no real profile photo → disqualified
+    // before we spend any AI tokens on qualify/score.
+    if (linkedin.enrichment_status === "enriched") {
+      const lowConnections = linkedin.connections != null && linkedin.connections < 200;
+      const noPhoto = !linkedin.has_profile_photo;
+      if (lowConnections || noPhoto) {
+        disqualified++;
+        const reasons: string[] = [];
+        if (lowConnections) reasons.push(`manje od 200 konekcija (${linkedin.connections})`);
+        if (noPhoto) reasons.push("nema profilnu sliku");
+        await supabase
+          .from("audience_members")
+          .update({
+            qualify_status: "disqualified",
+            qualify_source: "linkedin_gate",
+            qualify_reason: `LinkedIn kriterijum: ${reasons.join(" + ")}.`,
+            raw: {
+              ...raw,
+              provenance: {
+                firecrawl_website: "skipped",
+                brightdata_person: linkedin.enrichment_status,
+                brightdata_company: companyEnrichment ? "enriched" : rawBase.company_linkedin_url ? "no_data" : "skipped",
+                ai_qualify: "skipped",
+                qualified_via: "linkedin_gate",
+                ai_score: "skipped",
+              },
+            },
+          })
+          .eq("id", member.id);
+        continue;
+      }
+    }
+
     try {
       // Step 1: Qualify
       const qualResult = await qualifyLead(
@@ -242,6 +276,9 @@ export async function POST(
           raw: {
             ...raw,
             provenance: { ...provenance, ai_score: "ok" },
+            // Batch A = active on LinkedIn (BrightData returned an activity
+            // bundle) → priority for HeyReach push. Batch B = inactive.
+            outreach_batch: linkedin.active_last_30_days ? "A" : "B",
             fit_score: scoreResult.fit_score,
             priority: scoreResult.priority,
             score_explanation: scoreResult.explanation,
