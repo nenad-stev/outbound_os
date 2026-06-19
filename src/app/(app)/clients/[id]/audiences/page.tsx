@@ -20,7 +20,7 @@ export default async function AudiencesPage({
       .order("created_at", { ascending: false }),
     supabase
       .from("sender_profiles")
-      .select("id, name")
+      .select("id, full_name")
       .eq("client_id", id)
       .eq("is_active", true)
       .order("rotation_order"),
@@ -28,7 +28,7 @@ export default async function AudiencesPage({
 
   if (!clientData) notFound();
   const audiences = (audiencesData ?? []) as any[];
-  const senderProfiles = (profilesData ?? []) as { id: string; name: string }[];
+  const senderProfiles = ((profilesData ?? []) as { id: string; full_name: string }[]).map((p) => ({ id: p.id, name: p.full_name }));
 
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#272727", padding: "32px" }}>

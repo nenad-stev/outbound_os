@@ -13,7 +13,7 @@ export async function GET(_req: NextRequest, { params }: Ctx) {
 
   const { data, error } = await supabase
     .from("contacted_history")
-    .select("batch_id, batch_name, source, sender_profile_id, sender_profiles(name), uploaded_at")
+    .select("batch_id, batch_name, source, sender_profile_id, sender_profiles(full_name), uploaded_at")
     .eq("client_id", clientId)
     .order("uploaded_at", { ascending: false });
 
@@ -33,7 +33,7 @@ export async function GET(_req: NextRequest, { params }: Ctx) {
         batch_name: row.batch_name,
         source: row.source,
         sender_profile_id: row.sender_profile_id ?? null,
-        sender_profile_name: row.sender_profiles?.name ?? null,
+        sender_profile_name: row.sender_profiles?.full_name ?? null,
         uploaded_at: row.uploaded_at,
         count: 0,
       };
