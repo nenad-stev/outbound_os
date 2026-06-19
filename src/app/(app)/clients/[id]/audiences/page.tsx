@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import ContactedHistorySection from "./ContactedHistorySection";
 
 export default async function AudiencesPage({
   params,
@@ -122,6 +123,8 @@ export default async function AudiencesPage({
           ))}
         </div>
       )}
+
+      <ContactedHistorySection clientId={id} />
     </div>
   );
 }

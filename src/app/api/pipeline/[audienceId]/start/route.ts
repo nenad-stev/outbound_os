@@ -46,6 +46,20 @@ export async function POST(
     return NextResponse.json({ message: "No pending members." });
   }
 
+  // Dedup: fetch contacted_history for this client, build match sets
+  const clientId = (audience as any).client_id as string;
+  const { data: historyRows } = await supabase
+    .from("contacted_history")
+    .select("linkedin_url, email")
+    .eq("client_id", clientId);
+
+  const contactedLinkedins = new Set<string>();
+  const contactedEmails = new Set<string>();
+  for (const r of (historyRows ?? []) as any[]) {
+    if (r.linkedin_url) contactedLinkedins.add(r.linkedin_url.toLowerCase().trim());
+    if (r.email) contactedEmails.add(r.email.toLowerCase().trim());
+  }
+
   // Pre-enrichment: BrightData LinkedIn scrape (people + companies), batched
   const personUrls = (members as any[])
     .map((m) => (m.raw as any).linkedin_url as string | undefined)
@@ -66,6 +80,18 @@ export async function POST(
 
   for (const member of members) {
     const rawBase = member.raw as any;
+
+    // Skip leads already contacted in a previous campaign (any external tool)
+    const liLower = (rawBase.linkedin_url as string | null)?.toLowerCase().trim();
+    const emailLower = (rawBase.email as string | null)?.toLowerCase().trim();
+    if ((liLower && contactedLinkedins.has(liLower)) || (emailLower && contactedEmails.has(emailLower))) {
+      disqualified++;
+      await supabase
+        .from("audience_members")
+        .update({ qualify_status: "disqualified", qualify_source: "none", qualify_reason: "Već kontaktirano – pronađeno u istoriji kontakta." })
+        .eq("id", member.id);
+      continue;
+    }
 
     // Build identity + LinkedIn enrichment from BrightData result
     const identity = buildIdentity(rawBase, owner);
