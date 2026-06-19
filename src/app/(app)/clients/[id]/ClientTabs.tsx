@@ -8,6 +8,7 @@ interface Tab { label: string; seg: string | null; group?: boolean }
 // seg === null → overview (exact match). Otherwise matched as a path segment.
 const TABS: Tab[] = [
   { label: "Overview", seg: null },
+  { label: "🚀 Pokreni", seg: "launch" },
   { label: "ICP", seg: "icp", group: true },
   { label: "Senders", seg: "profiles" },
   { label: "Audiences", seg: "audiences", group: true },

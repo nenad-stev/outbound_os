@@ -40,15 +40,16 @@ export async function renderLeadMessages(
     .map((s) => `${s.step_order}. (${s.label}): ${s.template_text}`)
     .join("\n");
 
-  const prompt = `Ti si copywriter za B2B LinkedIn outreach koji piše ISKLJUČIVO na srpskom jeziku.
+  const prompt = `Ti si copywriter za B2B LinkedIn outreach.
 
 Dobijaš poruke iz sekvence. Za SVAKU vrati finalnu verziju po ovim pravilima:
-1. Zadrži tekst i ton tačno kako jeste — ne preuređuj rečenice koje nisu u zagradama.
-2. Tekst u UGLASTIM zagradama [ ... ] je uputstvo šta treba da napišeš na tom mestu. Zameni CELU zagradu (sa [ i ]) kratkim, konkretnim, personalizovanim tekstom na srpskom za ovu osobu/firmu. NIKAD ne ostavljaj uglaste zagrade u rezultatu.
-3. Vitičaste oznake {first_name}, {company}, {title} itd. zameni stvarnim podacima osobe.
-4. Imena osoba MORAJU biti u pravilnom srpskom VOKATIVU kada se neko oslovljava. Primeri: "Zdravo {first_name}" → "Zdravo Vladimire" (Vladimir), "Zdravo Marko" → "Zdravo Marko", "Zdravo Miloš" → "Zdravo Miloše", "Zdravo Stefan" → "Zdravo Stefane", "Zdravo Ana" → "Zdravo Ana", "Zdravo Jovana" → "Zdravo Jovana", "Zdravo Nikola" → "Zdravo Nikola", "Zdravo Đorđe" → "Zdravo Đorđe".
-5. SVE mora biti na srpskom (osim naziva firmi/brendova). Bez navodnika oko cele poruke, bez potpisa, bez objašnjenja.
-${extraBrief ? `6. Dodatno uputstvo za stil/sadržaj personalizacije: ${extraBrief}\n` : ""}
+1. JEZIK: piši na ISTOM jeziku na kom je napisan template te poruke. Ako je template na engleskom → ceo tekst na engleskom; ako je na srpskom → na srpskom. Ne prevodi i ne menjaj jezik.
+2. Zadrži tekst i ton tačno kako jeste — ne preuređuj rečenice koje nisu u zagradama.
+3. Tekst u UGLASTIM zagradama [ ... ] je uputstvo šta treba da napišeš na tom mestu. Zameni CELU zagradu (sa [ i ]) kratkim, konkretnim, personalizovanim tekstom (na jeziku template-a) za ovu osobu/firmu. NIKAD ne ostavljaj uglaste zagrade u rezultatu.
+4. Vitičaste oznake {first_name}, {company}, {title} itd. zameni stvarnim podacima osobe.
+5. Ako je jezik te poruke SRPSKI, imena osoba MORAJU biti u pravilnom srpskom VOKATIVU pri oslovljavanju. Primeri: "Zdravo {first_name}" → "Zdravo Vladimire" (Vladimir), "Zdravo Marko" → "Zdravo Marko", "Zdravo Miloš" → "Zdravo Miloše", "Zdravo Stefan" → "Zdravo Stefane", "Zdravo Ana" → "Zdravo Ana", "Zdravo Nikola" → "Zdravo Nikola". Ako je jezik engleski, ime ostavi kako jeste (nominativ).
+6. Bez navodnika oko cele poruke, bez potpisa, bez objašnjenja.
+${extraBrief ? `7. Dodatno uputstvo za stil/sadržaj personalizacije: ${extraBrief}\n` : ""}
 PODACI O OSOBI:
 Ime: ${name || "Nepoznato"}
 Pozicija: ${lead.title ?? "Nepoznato"}

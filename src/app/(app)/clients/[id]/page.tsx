@@ -157,22 +157,38 @@ export default async function ClientDetailPage({
             </a>
           )}
         </div>
-        <form action={toggleActive}>
-          <button
-            type="submit"
+        <div className="flex items-center" style={{ gap: "10px" }}>
+          <Link
+            href={`/clients/${client.id}/launch`}
             style={{
-              backgroundColor: "transparent",
-              border: "1px solid rgba(255,255,255,0.08)",
-              color: "rgba(255,255,255,0.4)",
+              backgroundColor: "#FFCC00",
+              color: "#272727",
+              fontWeight: 600,
               borderRadius: "12px",
               padding: "10px 20px",
               fontSize: "14px",
-              cursor: "pointer",
+              textDecoration: "none",
             }}
           >
-            {client.is_active ? "Deactivate" : "Activate"}
-          </button>
-        </form>
+            🚀 Pokreni kampanju
+          </Link>
+          <form action={toggleActive}>
+            <button
+              type="submit"
+              style={{
+                backgroundColor: "transparent",
+                border: "1px solid rgba(255,255,255,0.08)",
+                color: "rgba(255,255,255,0.4)",
+                borderRadius: "12px",
+                padding: "10px 20px",
+                fontSize: "14px",
+                cursor: "pointer",
+              }}
+            >
+              {client.is_active ? "Deactivate" : "Activate"}
+            </button>
+          </form>
+        </div>
       </div>
 
       {/* Category groups */}
