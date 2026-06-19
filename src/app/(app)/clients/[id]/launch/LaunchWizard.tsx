@@ -151,6 +151,8 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
   // Step 3 — pipeline
   const [pipeResult, setPipeResult] = useState<{ qualified: number; disqualified: number; noData: number } | null>(null);
   const [progress, setProgress] = useState<{ total: number; processed: number } | null>(null);
+  const [msgGenPhase, setMsgGenPhase] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [msgGenResult, setMsgGenResult] = useState<{ updated: number; failed: number } | null>(null);
   const cancelRef = useRef(false);
 
   useEffect(() => () => { cancelRef.current = true; }, []);
@@ -302,6 +304,8 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
   // updating the progress bar after every batch until nothing is pending.
   async function runPipeline() {
     setError(null);
+    setMsgGenPhase("idle");
+    setMsgGenResult(null);
     setBusy(true);
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -364,6 +368,25 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
             disqualified: fp?.disqualified ?? 0,
             noData: fp?.noData ?? 0,
           });
+          // Auto-generate messages for all qualified leads before handing off
+          // to Review Queue, so they arrive with messages ready.
+          if ((fp?.qualified ?? 0) > 0) {
+            setMsgGenPhase("running");
+            try {
+              const mgRes = await fetch(`/api/review/${audienceId}/regenerate-messages`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ scope: "all" }),
+              }).catch(() => null);
+              if (mgRes) {
+                const mgBody = await readJsonSafe(mgRes);
+                setMsgGenResult({ updated: mgBody?.updated ?? 0, failed: mgBody?.failed ?? 0 });
+              }
+              setMsgGenPhase("done");
+            } catch {
+              setMsgGenPhase("error");
+            }
+          }
           break;
         }
 
@@ -710,24 +733,45 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
               })()}
             </div>
           ) : (
-            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-              <div style={{ flex: 1, minWidth: "120px", backgroundColor: "rgba(134,239,172,0.08)", border: "1px solid rgba(134,239,172,0.2)", borderRadius: "12px", padding: "14px" }}>
-                <p style={{ fontSize: "24px", fontWeight: 700, color: "#86EFAC", margin: 0 }}>{pipeResult.qualified}</p>
-                <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)", margin: 0 }}>qualified</p>
+            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+              <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: "120px", backgroundColor: "rgba(134,239,172,0.08)", border: "1px solid rgba(134,239,172,0.2)", borderRadius: "12px", padding: "14px" }}>
+                  <p style={{ fontSize: "24px", fontWeight: 700, color: "#86EFAC", margin: 0 }}>{pipeResult.qualified}</p>
+                  <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)", margin: 0 }}>qualified</p>
+                </div>
+                <div style={{ flex: 1, minWidth: "120px", backgroundColor: "rgba(248,113,113,0.06)", border: "1px solid rgba(248,113,113,0.15)", borderRadius: "12px", padding: "14px" }}>
+                  <p style={{ fontSize: "24px", fontWeight: 700, color: "#F87171", margin: 0 }}>{pipeResult.disqualified}</p>
+                  <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)", margin: 0 }}>disqualified</p>
+                </div>
+                <div style={{ flex: 1, minWidth: "120px", backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "12px", padding: "14px" }}>
+                  <p style={{ fontSize: "24px", fontWeight: 700, color: "#BDBDBD", margin: 0 }}>{pipeResult.noData}</p>
+                  <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)", margin: 0 }}>bez podataka</p>
+                </div>
               </div>
-              <div style={{ flex: 1, minWidth: "120px", backgroundColor: "rgba(248,113,113,0.06)", border: "1px solid rgba(248,113,113,0.15)", borderRadius: "12px", padding: "14px" }}>
-                <p style={{ fontSize: "24px", fontWeight: 700, color: "#F87171", margin: 0 }}>{pipeResult.disqualified}</p>
-                <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)", margin: 0 }}>disqualified</p>
-              </div>
-              <div style={{ flex: 1, minWidth: "120px", backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "12px", padding: "14px" }}>
-                <p style={{ fontSize: "24px", fontWeight: 700, color: "#BDBDBD", margin: 0 }}>{pipeResult.noData}</p>
-                <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)", margin: 0 }}>bez podataka</p>
-              </div>
+              {/* Message generation status */}
+              {msgGenPhase === "running" && (
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 14px", backgroundColor: "rgba(165,180,252,0.08)", border: "1px solid rgba(165,180,252,0.2)", borderRadius: "10px" }}>
+                  <span style={{ fontSize: "13px", color: "#A5B4FC" }}>✍ Generišem poruke za {pipeResult.qualified} qualified leadova…</span>
+                </div>
+              )}
+              {msgGenPhase === "done" && msgGenResult && (
+                <div style={{ padding: "10px 14px", backgroundColor: "rgba(134,239,172,0.06)", border: "1px solid rgba(134,239,172,0.15)", borderRadius: "10px" }}>
+                  <p style={{ fontSize: "13px", color: "#86EFAC", margin: 0, fontWeight: 600 }}>
+                    ✓ Poruke generisane: {msgGenResult.updated}
+                    {msgGenResult.failed > 0 && <span style={{ color: "#F87171", fontWeight: 400 }}> · {msgGenResult.failed} nisu uspele (klikni ↻ u Review Queue)</span>}
+                  </p>
+                </div>
+              )}
+              {msgGenPhase === "error" && (
+                <div style={{ padding: "10px 14px", backgroundColor: "rgba(248,113,113,0.06)", border: "1px solid rgba(248,113,113,0.15)", borderRadius: "10px" }}>
+                  <p style={{ fontSize: "13px", color: "#F87171", margin: 0 }}>⚠ Generisanje poruka nije uspelo — klikni ↻ u Review Queue za svaki lead.</p>
+                </div>
+              )}
             </div>
           )}
 
           <Err msg={error} />
-          <NavButtons onBack={() => setStep(2)} onNext={() => setStep(4)} nextLabel="Dalje: pregled →" nextDisabled={!pipeResult} busy={busy} />
+          <NavButtons onBack={() => setStep(2)} onNext={() => setStep(4)} nextLabel="Dalje: pregled →" nextDisabled={!pipeResult || msgGenPhase === "running"} busy={busy} />
         </div>
       )}
 
