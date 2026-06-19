@@ -41,7 +41,19 @@ export async function POST(
 
   if (memErr) return NextResponse.json({ error: memErr.message }, { status: 500 });
   if (!members || members.length === 0) {
-    return NextResponse.json({ message: "No pending members.", qualified: 0, disqualified: 0, noData: 0 });
+    // Nothing left to claim — report the audience's actual cumulative counts
+    // so the UI shows real totals instead of 0/0/0 on an already-processed run.
+    const { data: all } = await supabase
+      .from("audience_members")
+      .select("qualify_status")
+      .eq("audience_id", audienceId);
+    const rows = all ?? [];
+    return NextResponse.json({
+      message: "No pending members.",
+      qualified: rows.filter((r) => r.qualify_status === "qualified").length,
+      disqualified: rows.filter((r) => r.qualify_status === "disqualified").length,
+      noData: rows.filter((r) => r.qualify_status === "not_able_to_qualify").length,
+    });
   }
 
   // Dedup: fetch contacted_history for this client, build match sets

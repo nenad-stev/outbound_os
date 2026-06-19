@@ -293,14 +293,10 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
 
     // Fire the work. The serverless function keeps running even if the
     // gateway drops our connection (long enrichment), so a rejection here is
-    // NOT fatal — polling below is the source of truth for completion.
+    // NOT fatal. We deliberately ignore the POST body and let polling read the
+    // true cumulative counts from /progress — otherwise an already-processed
+    // audience (0 pending claimed) would report 0/0/0 instead of real totals.
     fetch(`/api/pipeline/${audienceId}/start`, { method: "POST" })
-      .then(async (res) => {
-        const body = await res.json().catch(() => null);
-        if (res.ok && body && typeof body.qualified === "number") {
-          finish(body.qualified, body.disqualified ?? 0, body.noData ?? 0);
-        }
-      })
       .catch(() => { /* connection dropped — polling will detect completion */ });
 
     // Poll progress until every member is processed (pending === 0).
@@ -342,7 +338,9 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
     };
 
     await poll(); // immediate first read
-    pollRef.current = setInterval(poll, 2500);
+    // If the audience was already fully processed, the first poll calls
+    // finish() synchronously — don't start a redundant interval in that case.
+    if (!settled) pollRef.current = setInterval(poll, 2500);
   }
 
   return (
