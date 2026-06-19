@@ -34,7 +34,7 @@ export default async function ClientReviewPage({
     supabase.from("clients").select("id, name").eq("id", id).maybeSingle(),
     supabase
       .from("audiences")
-      .select("id, name, source_meta, campaigns(name, heyreach_campaign_id), sender_profiles(heyreach_account_id)")
+      .select("id, name, source_meta, campaign_id, campaigns(name, heyreach_campaign_id), sender_profiles(full_name, heyreach_account_id)")
       .eq("client_id", id)
       .order("created_at", { ascending: false }),
   ]);
@@ -64,15 +64,39 @@ export default async function ClientReviewPage({
   }
 
   let leads: any[] = [];
+  let sequenceSteps: any[] = [];
   if (selectedAudience) {
-    const { data } = await supabase
-      .from("audience_members")
-      .select("id, audience_id, qualify_status, qualify_source, qualify_reason, review_status, raw")
-      .eq("audience_id", selectedAudience.id)
-      .eq("qualify_status", "qualified")
-      .order("id");
-    leads = (data ?? []) as any[];
+    const [{ data: leadRows }, stepRes] = await Promise.all([
+      supabase
+        .from("audience_members")
+        .select("id, audience_id, qualify_status, qualify_source, qualify_reason, review_status, raw")
+        .eq("audience_id", selectedAudience.id)
+        .eq("qualify_status", "qualified")
+        .order("id"),
+      selectedAudience.campaign_id
+        ? supabase
+            .from("sequence_steps")
+            .select("step_order, channel, template_text, delay_days")
+            .eq("campaign_id", selectedAudience.campaign_id)
+            .order("step_order")
+        : Promise.resolve({ data: [] as any[] }),
+    ]);
+    leads = (leadRows ?? []) as any[];
+    sequenceSteps = (stepRes.data ?? []) as any[];
   }
+
+  // HeyReach push readiness — surfaced as a pre-push warning in the queue.
+  const heyreachIssues: string[] = [];
+  if (selectedAudience) {
+    if (!selectedAudience.campaigns?.heyreach_campaign_id)
+      heyreachIssues.push("Kampanja nema HeyReach campaign ID (Campaigns → settings).");
+    if (!selectedAudience.sender_profiles?.heyreach_account_id)
+      heyreachIssues.push("Sender profile nema HeyReach account ID (Senders → settings).");
+  }
+  // Does the sequence actually use {personalization}? If so, push requires it per lead.
+  const requiresPersonalization = sequenceSteps.some((s) =>
+    /\{\s*personal/i.test(String(s.template_text ?? ""))
+  );
 
   return (
     <div>
@@ -168,6 +192,9 @@ export default async function ClientReviewPage({
                   audienceId={selectedAudience.id}
                   campaignName={selectedAudience.campaigns?.name ?? selectedAudience.name}
                   initialTemplate={(selectedAudience.source_meta as any)?.message_template ?? ""}
+                  sequenceSteps={sequenceSteps}
+                  heyreachIssues={heyreachIssues}
+                  requiresPersonalization={requiresPersonalization}
                 />
               )
             ) : null}

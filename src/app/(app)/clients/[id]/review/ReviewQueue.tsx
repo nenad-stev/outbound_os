@@ -4,6 +4,20 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { setMemberReviewStatus, bulkSetReviewStatus, updateMemberPersonalization } from "@/app/actions/review";
 import { downloadCsv } from "@/lib/csv-export";
+import { renderTemplateSegments } from "@/lib/message-preview";
+
+interface SequenceStep {
+  step_order: number;
+  channel: string;
+  template_text: string;
+  delay_days: number;
+}
+
+const CHANNEL_LABEL: Record<string, string> = {
+  connection_request: "Connection request",
+  message: "Poruka",
+  inmail: "InMail",
+};
 
 interface Lead {
   id: string;
@@ -48,11 +62,15 @@ function LeadCard({
   clientId,
   selected,
   onSelect,
+  sequenceSteps,
+  requiresPersonalization,
 }: {
   lead: Lead;
   clientId: string;
   selected: boolean;
   onSelect: (id: string) => void;
+  sequenceSteps: SequenceStep[];
+  requiresPersonalization: boolean;
 }) {
   const [isPending, startTransition] = useTransition();
   const r = lead.raw;
@@ -66,6 +84,18 @@ function LeadCard({
   const [msg, setMsg] = useState(r.personalization ?? "");
   const [editing, setEditing] = useState(false);
   const [savingMsg, setSavingMsg] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+
+  // Pre-push blockers for this lead
+  const missingLinkedIn = !r.linkedin_url;
+  const missingPersonalization = requiresPersonalization && !msg.trim();
+  const blockers: string[] = [];
+  if (missingLinkedIn) blockers.push("nema LinkedIn URL");
+  if (missingPersonalization) blockers.push("nema personalizaciju");
+
+  // Build the per-lead preview from the *current* edited message
+  const previewLead = { ...r, personalization: msg };
+  let messageNo = 0;
 
   function toggle(status: "approved" | "rejected") {
     startTransition(() =>
@@ -104,6 +134,12 @@ function LeadCard({
                 {r.fit_score != null && (
                   <span style={{ fontSize: "12px", color: accentColor, fontWeight: 600 }}>
                     {r.fit_score}/100 · {priority.replace("_", " ").toUpperCase()}
+                  </span>
+                )}
+                {blockers.length > 0 && (
+                  <span title={`Push će preskočiti: ${blockers.join(", ")}`}
+                    style={{ fontSize: "11px", fontWeight: 600, color: "#F87171", backgroundColor: "rgba(248,113,113,0.12)", border: "1px solid rgba(248,113,113,0.3)", borderRadius: "999px", padding: "1px 8px" }}>
+                    ⚠ {blockers.join(", ")}
                   </span>
                 )}
               </div>
@@ -186,6 +222,48 @@ function LeadCard({
             )}
           </div>
 
+          {/* Full sequence preview — exactly what the lead receives, personalization filled */}
+          {sequenceSteps.length > 0 && (
+            <div style={{ marginTop: "8px" }}>
+              <button onClick={() => setShowPreview((v) => !v)}
+                style={{ display: "flex", alignItems: "center", gap: "6px", background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: "11px", fontWeight: 600, color: "rgba(255,255,255,0.5)" }}>
+                <span>Pregled cele sekvence ({sequenceSteps.length})</span>
+                <span style={{ display: "inline-block", transform: showPreview ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>▾</span>
+              </button>
+              {showPreview && (
+                <div style={{ marginTop: "8px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                  {sequenceSteps.map((step) => {
+                    const isMsg = step.channel === "message";
+                    if (isMsg) messageNo++;
+                    const label = step.channel === "message"
+                      ? `Poruka ${messageNo}`
+                      : CHANNEL_LABEL[step.channel] ?? step.channel;
+                    const segments = renderTemplateSegments(step.template_text ?? "", previewLead);
+                    return (
+                      <div key={step.step_order} style={{ backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "8px", padding: "8px 10px" }}>
+                        <div style={{ fontSize: "10px", fontWeight: 600, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "4px", display: "flex", gap: "8px" }}>
+                          <span>{step.step_order}. {label}</span>
+                          {step.delay_days > 0 && <span style={{ color: "rgba(255,255,255,0.25)" }}>+{step.delay_days}d</span>}
+                        </div>
+                        <p style={{ fontSize: "12px", lineHeight: 1.55, margin: 0, whiteSpace: "pre-wrap" }}>
+                          {segments.map((seg, i) => (
+                            <span key={i} style={
+                              seg.kind === "personalization"
+                                ? { color: "#A5B4FC", backgroundColor: "rgba(165,180,252,0.12)", borderRadius: "3px", padding: "0 2px" }
+                                : seg.kind === "missing"
+                                  ? { color: "#F87171", fontStyle: "italic" }
+                                  : { color: "#E0E0E0" }
+                            }>{seg.text}</span>
+                          ))}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Qualify reason */}
           {lead.qualify_reason && (
             <p style={{ marginTop: "4px", fontSize: "11px", color: "rgba(255,255,255,0.35)" }}>
@@ -204,12 +282,18 @@ export default function ReviewQueue({
   audienceId,
   campaignName,
   initialTemplate,
+  sequenceSteps,
+  heyreachIssues,
+  requiresPersonalization,
 }: {
   leads: Lead[];
   clientId: string;
   audienceId: string;
   campaignName: string;
   initialTemplate: string;
+  sequenceSteps: SequenceStep[];
+  heyreachIssues: string[];
+  requiresPersonalization: boolean;
 }) {
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -280,11 +364,25 @@ export default function ReviewQueue({
       const res = await fetch(`/api/heyreach/${audienceId}/push`, { method: "POST" });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "Push failed.");
-      setPushStatus(`✓ Pushed ${body.pushed} leadova u HeyReach`);
+      const skipped = body.skipped as { name: string; reason: string }[] | undefined;
+      let txt = `✓ Pushed ${body.pushed} leadova u HeyReach`;
+      if (skipped && skipped.length) {
+        txt += ` · ${skipped.length} preskočeno (${skipped.slice(0, 3).map((s) => s.name).join(", ")}${skipped.length > 3 ? "…" : ""})`;
+      }
+      setPushStatus(txt);
+      router.refresh();
     } catch (e: any) {
       setPushStatus(`✗ ${e.message}`);
     }
   }
+
+  // Approved leads that would be skipped on push (missing required fields)
+  const approvedBlocked = leads.filter((l) => {
+    if (l.review_status !== "approved") return false;
+    const noLi = !l.raw.linkedin_url;
+    const noPers = requiresPersonalization && !(l.raw.personalization ?? "").trim();
+    return noLi || noPers;
+  }).length;
 
   return (
     <div>
@@ -336,6 +434,19 @@ export default function ReviewQueue({
         <p style={{ marginBottom: "12px", borderRadius: "10px", padding: "10px 16px", fontSize: "13px", backgroundColor: pushStatus.startsWith("✓") ? "rgba(134,239,172,0.08)" : "rgba(239,68,68,0.08)", color: pushStatus.startsWith("✓") ? "#86EFAC" : "#F87171", border: pushStatus.startsWith("✓") ? "1px solid rgba(134,239,172,0.2)" : "1px solid rgba(239,68,68,0.2)" }}>
           {pushStatus}
         </p>
+      )}
+
+      {/* Pre-push readiness warnings */}
+      {(heyreachIssues.length > 0 || approvedBlocked > 0) && (
+        <div style={{ marginBottom: "12px", borderRadius: "10px", padding: "10px 14px", fontSize: "12px", backgroundColor: "rgba(255,204,0,0.07)", border: "1px solid rgba(255,204,0,0.25)", color: "#FFCC00" }}>
+          <span style={{ fontWeight: 600 }}>⚠ Pre push-a:</span>
+          <ul style={{ margin: "4px 0 0", paddingLeft: "18px", color: "#E0C77A" }}>
+            {heyreachIssues.map((issue, i) => <li key={i}>{issue}</li>)}
+            {approvedBlocked > 0 && (
+              <li>{approvedBlocked} approved {approvedBlocked === 1 ? "lead" : "leadova"} će biti preskočeno (fali LinkedIn URL{requiresPersonalization ? " ili personalizacija" : ""}). Vidi ⚠ oznake na karticama.</li>
+            )}
+          </ul>
+        </div>
       )}
 
       {/* Batch message regeneration */}
@@ -422,6 +533,8 @@ export default function ReviewQueue({
               clientId={clientId}
               selected={selected.has(lead.id)}
               onSelect={toggleSelect}
+              sequenceSteps={sequenceSteps}
+              requiresPersonalization={requiresPersonalization}
             />
           ))
         )}

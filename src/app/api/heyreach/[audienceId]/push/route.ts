@@ -39,6 +39,16 @@ export async function POST(
     );
   }
 
+  // Does the campaign sequence actually reference {personalization}? If so,
+  // a lead without it would receive a broken message — so we require it.
+  const { data: steps } = await supabase
+    .from("sequence_steps")
+    .select("template_text")
+    .eq("campaign_id", aud.campaign_id);
+  const requiresPersonalization = (steps ?? []).some((s: any) =>
+    /\{\s*personal/i.test(String(s.template_text ?? ""))
+  );
+
   // Load approved members not yet pushed
   const { data: members, error: memErr } = await supabase
     .from("audience_members")
@@ -52,9 +62,31 @@ export async function POST(
     return NextResponse.json({ pushed: 0, message: "Nema approved leadova za push." });
   }
 
+  // Partition: only push leads that have what's needed. Skipped ones stay
+  // "approved" so they can be fixed and re-pushed.
+  const valid: typeof members = [];
+  const skipped: { name: string; reason: string }[] = [];
+  for (const m of members) {
+    const r = m.raw as any;
+    const name = r.full_name || `${r.first_name ?? ""} ${r.last_name ?? ""}`.trim() || r.linkedin_url || "—";
+    if (!r.linkedin_url) { skipped.push({ name, reason: "nema LinkedIn URL" }); continue; }
+    if (requiresPersonalization && !String(r.personalization ?? "").trim()) {
+      skipped.push({ name, reason: "nema personalizaciju" });
+      continue;
+    }
+    valid.push(m);
+  }
+
+  if (valid.length === 0) {
+    return NextResponse.json(
+      { pushed: 0, skipped, error: "Svi approved leadovi su preskočeni — fali LinkedIn URL ili personalizacija." },
+      { status: 400 }
+    );
+  }
+
   // Build HeyReach payload
   // HeyReach expects batches; we send all at once (max 1000 per call)
-  const leadsWithLinkedInAccountIds = members.map((m) => {
+  const leadsWithLinkedInAccountIds = valid.map((m) => {
     const r = m.raw as any;
     return {
       lead: {
@@ -97,15 +129,15 @@ export async function POST(
     return NextResponse.json({ error: `HeyReach request failed: ${e.message}` }, { status: 502 });
   }
 
-  // Mark members as pushed
-  const memberIds = members.map((m) => m.id);
+  // Mark only the pushed (valid) members as pushed
+  const memberIds = valid.map((m) => m.id);
   await supabase
     .from("audience_members")
     .update({ review_status: "pushed" })
     .in("id", memberIds);
 
   // Upsert companies + people + lead_assignments + connection_status (best-effort)
-  for (const m of members) {
+  for (const m of valid) {
     const r = m.raw as any;
     try {
       // Upsert company (dedup on domain when present)
@@ -193,5 +225,5 @@ export async function POST(
     }
   }
 
-  return NextResponse.json({ pushed: memberIds.length });
+  return NextResponse.json({ pushed: memberIds.length, skipped });
 }
