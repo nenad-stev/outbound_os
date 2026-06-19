@@ -1,7 +1,7 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireRole, getCurrentUser } from "@/lib/auth";
+import { requireRole, ensureAppUser } from "@/lib/auth";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import type { CampaignType, PersonalizationLevel, SequenceChannel } from "@/lib/types";
@@ -51,7 +51,7 @@ export async function createCampaignAction(
   formData: FormData
 ): Promise<CampaignFormState> {
   await requireRole("operator");
-  const me = await getCurrentUser();
+  const meId = await ensureAppUser();
   const fields = parseCampaign(formData);
   if (!fields.name) return { error: "Name is required." };
 
@@ -61,7 +61,7 @@ export async function createCampaignAction(
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("campaigns")
-    .insert({ ...fields, client_id: clientId, created_by: me?.id ?? null })
+    .insert({ ...fields, client_id: clientId, created_by: meId })
     .select("id")
     .single();
 

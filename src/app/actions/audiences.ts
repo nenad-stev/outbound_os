@@ -1,7 +1,7 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireRole, getCurrentUser } from "@/lib/auth";
+import { requireRole, ensureAppUser } from "@/lib/auth";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { parseAndNormalize } from "@/lib/csv-normalizer";
@@ -14,7 +14,7 @@ export async function uploadAudienceAction(
   formData: FormData
 ): Promise<AudienceFormState> {
   await requireRole("operator");
-  const me = await getCurrentUser();
+  const meId = await ensureAppUser();
 
   const campaignId = String(formData.get("campaign_id") ?? "").trim();
   const icpId = String(formData.get("icp_profile_id") ?? "").trim();
@@ -45,7 +45,7 @@ export async function uploadAudienceAction(
       source: "csv",
       source_meta: { filename: file.name, format, skipped },
       row_count: leads.length,
-      imported_by: me?.id ?? null,
+      imported_by: meId,
     })
     .select("id")
     .single();

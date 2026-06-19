@@ -1,6 +1,29 @@
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import type { AppUser, UserRole } from "@/lib/types";
 import { redirect } from "next/navigation";
+
+// Ensure the signed-in user has an app_users row (the FK target for
+// created_by / imported_by). getCurrentUser() returns a synthetic identity when
+// no row exists, so writing that id into a FK column would violate the
+// constraint. Returns the app_users id, or null if not signed in / provisioning
+// failed (callers then store null instead of breaking the insert).
+export async function ensureAppUser(): Promise<string | null> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return null;
+
+  const admin = createAdminClient();
+  const { data: existing } = await admin.from("app_users").select("id").eq("id", user.id).maybeSingle();
+  if (existing) return existing.id;
+
+  const { error } = await admin.from("app_users").insert({
+    id: user.id,
+    email: user.email ?? "",
+    role: "operator",
+  });
+  return error ? null : user.id;
+}
 
 // Resolves the signed-in user and their app_users role row.
 // Falls back to a default 'operator' identity if no app_users row exists yet

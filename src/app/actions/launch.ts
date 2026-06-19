@@ -1,7 +1,7 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireRole, getCurrentUser } from "@/lib/auth";
+import { requireRole, ensureAppUser } from "@/lib/auth";
 import { parseAndNormalize } from "@/lib/csv-normalizer";
 import type { PersonalizationLevel, SequenceChannel } from "@/lib/types";
 
@@ -25,7 +25,7 @@ export async function createLaunchCampaign(
   }
 ): Promise<{ id?: string; error?: string }> {
   await requireRole("operator");
-  const me = await getCurrentUser();
+  const meId = await ensureAppUser();
 
   const name = input.name.trim();
   if (!name) return { error: "Naziv kampanje je obavezan." };
@@ -42,7 +42,7 @@ export async function createLaunchCampaign(
       personalization_level: input.personalization_level,
       heyreach_campaign_id: input.heyreach_campaign_id || null,
       sender_profile_id: input.sender_profile_id || null,
-      created_by: me?.id ?? null,
+      created_by: meId,
     })
     .select("id")
     .single();
@@ -68,7 +68,7 @@ export async function createLaunchAudience(
   formData: FormData
 ): Promise<{ id?: string; count?: number; error?: string }> {
   await requireRole("operator");
-  const me = await getCurrentUser();
+  const meId = await ensureAppUser();
 
   const campaignId = String(formData.get("campaign_id") ?? "").trim();
   const senderProfileId = String(formData.get("sender_profile_id") ?? "").trim();
@@ -99,7 +99,7 @@ export async function createLaunchAudience(
       source: "csv",
       source_meta: { filename: file.name, format, skipped },
       row_count: leads.length,
-      imported_by: me?.id ?? null,
+      imported_by: meId,
     })
     .select("id")
     .single();
