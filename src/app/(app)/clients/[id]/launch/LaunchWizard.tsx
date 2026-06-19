@@ -227,10 +227,10 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
           icp_profile_id: icpId,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) { setHrError(data.error ?? "Import nije uspeo."); return; }
-      setAudienceId(data.audience_id);
-      setAudienceCount(data.count);
+      const data = await readJsonSafe(res);
+      if (!res.ok) { setHrError(data?.error ?? data?.__text ?? "Import nije uspeo."); return; }
+      setAudienceId(data?.audience_id);
+      setAudienceCount(data?.count);
     } catch (e: any) {
       setHrError(e.message);
     } finally {
@@ -277,70 +277,87 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
     setStep(3);
   }
 
+  // Read any response body as JSON without ever throwing — the long pipeline
+  // POST can return a plain-text gateway error ("An error occurred…") which
+  // would otherwise blow up res.json() with "Unexpected token".
+  async function readJsonSafe(res: Response): Promise<any | null> {
+    let text = "";
+    try { text = await res.text(); } catch { return null; }
+    try { return JSON.parse(text); } catch { return { __text: text }; }
+  }
+
   async function runPipeline() {
     setError(null);
-    setProgress(null);
+    setProgress({ total: audienceCount ?? 0, processed: 0 }); // show the bar instantly
     setBusy(true);
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
 
     let settled = false;
-    const finish = (q: number, d: number, n: number) => {
+    let startError: string | null = null;
+    const stop = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
+    const finishOk = (q: number, d: number, n: number) => {
       if (settled) return;
-      settled = true;
-      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      settled = true; stop();
       setPipeResult({ qualified: q, disqualified: d, noData: n });
       setBusy(false);
     };
+    const finishErr = (msg: string) => {
+      if (settled) return;
+      settled = true; stop();
+      setError(msg);
+      setBusy(false);
+    };
 
-    // Fire the work. The serverless function keeps running even if the
-    // gateway drops our connection (long enrichment), so a rejection here is
-    // NOT fatal. We deliberately ignore the POST body and let polling read the
-    // true cumulative counts from /progress — otherwise an already-processed
-    // audience (0 pending claimed) would report 0/0/0 instead of real totals.
+    // Fire the work. The serverless function keeps running even if the gateway
+    // drops our connection, so a rejection here is NOT fatal — polling owns
+    // completion. We only remember a server-side error to show if polling stalls.
     fetch(`/api/pipeline/${audienceId}/start`, { method: "POST" })
-      .catch(() => { /* connection dropped — polling will detect completion */ });
+      .then(async (res) => {
+        if (!res.ok) {
+          const body = await readJsonSafe(res);
+          const raw = body?.error ?? body?.__text ?? `HTTP ${res.status}`;
+          startError = `Server greška tokom obrade: ${String(raw).slice(0, 200)}`;
+        }
+      })
+      .catch(() => { /* connection dropped — polling detects completion */ });
 
-    // Poll progress until every member is processed (pending === 0).
+    // Poll progress until every member has a final status (pending === 0).
     let stalls = 0;
     let lastProcessed = -1;
     const poll = async () => {
-      try {
-        const r = await fetch(`/api/pipeline/${audienceId}/progress`);
-        if (!r.ok) return;
-        const d = await r.json();
-        const total = d.total ?? 0;
-        const processed = d.processed ?? 0;
-        setProgress({ total, processed });
+      const r = await fetch(`/api/pipeline/${audienceId}/progress`, { cache: "no-store" }).catch(() => null);
+      if (!r) return;
+      const d = await readJsonSafe(r);
+      if (!d || typeof d.total !== "number") return;
 
-        // Done: all members have a final status
-        if (total > 0 && (d.pending ?? 0) === 0) {
-          finish(d.qualified ?? 0, d.disqualified ?? 0, d.noData ?? 0);
-          return;
-        }
+      const total = d.total as number;
+      const processed = d.processed ?? 0;
+      setProgress({ total, processed });
 
-        // Stall detection: no movement for ~40s likely means a server timeout
-        // cut the run short (Vercel hobby caps functions at 60s).
-        if (processed === lastProcessed) {
-          stalls++;
-          if (stalls >= 16 && !settled) {
-            if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-            settled = true;
-            setBusy(false);
-            setError(
-              `Obrada je stala na ${processed}/${total} leadova (verovatno serverski timeout). ` +
-              `Već obrađeni su sačuvani — klikni "Pokreni obradu" ponovo da nastaviš sa preostalima.`
-            );
-          }
-        } else {
-          stalls = 0;
-          lastProcessed = processed;
+      if (total > 0 && (d.pending ?? 0) === 0) {
+        finishOk(d.qualified ?? 0, d.disqualified ?? 0, d.noData ?? 0);
+        return;
+      }
+
+      // Stall detection: no movement for ~40s likely means a server timeout
+      // (Vercel hobby caps functions at 60s) — or the start call errored.
+      if (processed === lastProcessed) {
+        stalls++;
+        if (stalls >= 20 && !settled) {
+          finishErr(
+            startError ??
+            `Obrada je stala na ${processed}/${total} leadova (verovatno serverski timeout). ` +
+            `Već obrađeni su sačuvani — klikni "Pokreni obradu" ponovo da nastaviš sa preostalima.`
+          );
         }
-      } catch { /* ignore individual poll errors */ }
+      } else {
+        stalls = 0;
+        lastProcessed = processed;
+      }
     };
 
     await poll(); // immediate first read
-    // If the audience was already fully processed, the first poll calls
-    // finish() synchronously — don't start a redundant interval in that case.
-    if (!settled) pollRef.current = setInterval(poll, 2500);
+    if (!settled) pollRef.current = setInterval(poll, 2000);
   }
 
   return (
@@ -633,21 +650,34 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
                 style={{ backgroundColor: "#A5B4FC", color: "#272727", fontWeight: 600, borderRadius: "10px", padding: "11px 22px", fontSize: "14px", border: "none", cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.6 : 1 }}>
                 {busy ? "Obrađujem…" : "▶ Pokreni obradu"}
               </button>
-              {busy && (
-                <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
-                  <PipelineProgress processed={progress?.processed ?? 0} total={progress?.total ?? (audienceCount ?? 0)} />
-                  <div>
-                    <p style={{ fontSize: "14px", color: "#FFFFFF", fontWeight: 600, margin: 0 }}>
-                      {progress
-                        ? `${progress.processed} od ${progress.total} leadova`
-                        : "Priprema…"}
-                    </p>
-                    <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.4)", marginTop: "4px" }}>
-                      Enrichment + AI kvalifikacija. Može potrajati par minuta.
-                    </p>
+              {busy && (() => {
+                const total = progress?.total ?? (audienceCount ?? 0);
+                const processed = progress?.processed ?? 0;
+                const pct = total > 0 ? Math.min(processed / total, 1) : 0;
+                return (
+                  <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: "16px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
+                      <PipelineProgress processed={processed} total={total} />
+                      <div>
+                        <p style={{ fontSize: "22px", fontWeight: 700, color: "#FFFFFF", margin: 0, lineHeight: 1.1 }}>
+                          {processed} <span style={{ fontSize: "15px", fontWeight: 500, color: "rgba(255,255,255,0.45)" }}>/ {total || "…"} leadova</span>
+                        </p>
+                        <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.4)", marginTop: "6px" }}>
+                          Enrichment + AI kvalifikacija. Osvežava se na 2s — može potrajati par minuta.
+                        </p>
+                      </div>
+                    </div>
+                    {/* Linear progress bar */}
+                    <div style={{ width: "100%", height: "10px", borderRadius: "999px", backgroundColor: "rgba(255,255,255,0.08)", overflow: "hidden" }}>
+                      <div style={{
+                        width: `${Math.round(pct * 100)}%`, height: "100%", borderRadius: "999px",
+                        backgroundColor: pct >= 1 ? "#86EFAC" : "#A5B4FC",
+                        transition: "width 0.4s ease, background-color 0.3s",
+                      }} />
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </div>
           ) : (
             <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
