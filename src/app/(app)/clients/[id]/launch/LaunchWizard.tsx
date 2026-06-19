@@ -314,11 +314,27 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
       while (true) {
         if (cancelRef.current) return;
 
-        const res = await fetch(`/api/pipeline/${audienceId}/start`, {
+        // Fire the batch request, but poll progress every 2s while it's in flight
+        // so the user sees the bar move during long BrightData scrapes.
+        let batchSettled = false;
+        const batchPromise = fetch(`/api/pipeline/${audienceId}/start`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ limit: 3 }),
         }).catch(() => null);
+
+        const pollWhileBusy = (async () => {
+          while (!batchSettled) {
+            await sleep(2000);
+            if (batchSettled || cancelRef.current) break;
+            const p = await readProgress();
+            if (p) setProgress({ total: p.total, processed: p.processed });
+          }
+        })();
+
+        const res = await batchPromise;
+        batchSettled = true;
+        await pollWhileBusy;
 
         // Network drop / batch timeout — already-processed leads are saved.
         if (!res) {
