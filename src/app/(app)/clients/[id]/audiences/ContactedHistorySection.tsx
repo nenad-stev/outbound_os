@@ -1,13 +1,20 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useRef, useState, useTransition, useEffect } from "react";
 
 interface Batch {
   batch_id: string;
   batch_name: string;
   source: string;
+  sender_profile_id: string | null;
+  sender_profile_name: string | null;
   uploaded_at: string;
   count: number;
+}
+
+interface SenderProfile {
+  id: string;
+  name: string;
 }
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -21,13 +28,20 @@ function fmtDate(iso: string) {
   return new Date(iso).toLocaleDateString("sr-RS", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-export default function ContactedHistorySection({ clientId }: { clientId: string }) {
+export default function ContactedHistorySection({
+  clientId,
+  senderProfiles,
+}: {
+  clientId: string;
+  senderProfiles: SenderProfile[];
+}) {
   const [batches, setBatches] = useState<Batch[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, startUpload] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [selectedProfile, setSelectedProfile] = useState<string>(senderProfiles[0]?.id ?? "");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const total = batches.reduce((s, b) => s + b.count, 0);
@@ -45,16 +59,22 @@ export default function ContactedHistorySection({ clientId }: { clientId: string
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
+    if (!selectedProfile && senderProfiles.length > 0) {
+      setError("Izaberi identity (sender) pre uploada.");
+      return;
+    }
     setError(null);
     setSuccess(null);
     startUpload(async () => {
       const fd = new FormData();
       fd.append("csv_file", f);
+      if (selectedProfile) fd.append("sender_profile_id", selectedProfile);
       const res = await fetch(`/api/clients/${clientId}/contacted-history`, { method: "POST", body: fd });
       const json = await res.json();
       if (!res.ok) { setError(json.error ?? "Greška."); }
       else {
-        setSuccess(`Uvezeno ${json.inserted.toLocaleString()} kontakata (${SOURCE_LABEL[json.format] ?? json.format}).`);
+        const profileName = senderProfiles.find((p) => p.id === selectedProfile)?.name ?? "";
+        setSuccess(`Uvezeno ${json.inserted.toLocaleString()} kontakata (${SOURCE_LABEL[json.format] ?? json.format}${profileName ? ` · ${profileName}` : ""}).`);
         await fetchBatches();
         if (!expanded) setExpanded(true);
       }
@@ -68,52 +88,77 @@ export default function ContactedHistorySection({ clientId }: { clientId: string
     setBatches((prev) => prev.filter((b) => b.batch_id !== batchId));
   }
 
+  const selectStyle: React.CSSProperties = {
+    backgroundColor: "rgba(255,255,255,0.06)",
+    color: "#FFFFFF",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: "8px",
+    padding: "7px 10px",
+    fontSize: "13px",
+    outline: "none",
+    cursor: "pointer",
+  };
+
   return (
     <div style={{ marginTop: "40px", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: "32px" }}>
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <button
-            onClick={() => setExpanded((x) => !x)}
-            style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: "8px", padding: 0 }}
-          >
-            <span style={{ fontSize: "16px", fontWeight: 700, color: "#FFFFFF" }}>Istorija kontakta</span>
-            {total > 0 && (
-              <span style={{ fontSize: "11px", fontWeight: 600, color: "#272727", backgroundColor: "#FFCC00", borderRadius: "999px", padding: "1px 8px" }}>
-                {total.toLocaleString()}
-              </span>
-            )}
-            <span style={{ fontSize: "12px", color: "rgba(255,255,255,0.35)", transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>▾</span>
-          </button>
-          <span style={{ fontSize: "12px", color: "rgba(255,255,255,0.35)" }}>
-            Kontakti iz prethodnih kampanja — isključeni iz novog pipeline-a
-          </span>
-        </div>
+      {/* Header row */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap", marginBottom: "8px" }}>
+        <button
+          onClick={() => setExpanded((x) => !x)}
+          style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: "8px", padding: 0 }}
+        >
+          <span style={{ fontSize: "16px", fontWeight: 700, color: "#FFFFFF" }}>Istorija kontakta</span>
+          {total > 0 && (
+            <span style={{ fontSize: "11px", fontWeight: 600, color: "#272727", backgroundColor: "#FFCC00", borderRadius: "999px", padding: "1px 8px" }}>
+              {total.toLocaleString()}
+            </span>
+          )}
+          <span style={{ fontSize: "12px", color: "rgba(255,255,255,0.35)", display: "inline-block", transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>▾</span>
+        </button>
 
-        {/* Upload button */}
-        <label style={{
-          cursor: uploading ? "not-allowed" : "pointer",
-          backgroundColor: uploading ? "rgba(255,255,255,0.06)" : "rgba(255,204,0,0.12)",
-          color: "#FFCC00",
-          border: "1.5px solid #FFCC00",
-          borderRadius: "10px",
-          padding: "8px 16px",
-          fontSize: "13px",
-          fontWeight: 600,
-          display: "inline-block",
-          opacity: uploading ? 0.6 : 1,
-        }}>
-          {uploading ? "Uploading…" : "↑ Uvezi CSV"}
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".csv"
-            onChange={handleFileChange}
-            disabled={uploading}
-            style={{ display: "none" }}
-          />
-        </label>
+        {/* Identity selector + upload */}
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          {senderProfiles.length > 0 && (
+            <select
+              value={selectedProfile}
+              onChange={(e) => setSelectedProfile(e.target.value)}
+              style={selectStyle}
+            >
+              <option value="">— Izaberi identity —</option>
+              {senderProfiles.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          )}
+          <label style={{
+            cursor: uploading ? "not-allowed" : "pointer",
+            backgroundColor: uploading ? "rgba(255,255,255,0.06)" : "rgba(255,204,0,0.12)",
+            color: "#FFCC00",
+            border: "1.5px solid #FFCC00",
+            borderRadius: "10px",
+            padding: "8px 16px",
+            fontSize: "13px",
+            fontWeight: 600,
+            display: "inline-block",
+            opacity: uploading ? 0.6 : 1,
+            whiteSpace: "nowrap",
+          }}>
+            {uploading ? "Uploading…" : "↑ Uvezi CSV"}
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".csv"
+              onChange={handleFileChange}
+              disabled={uploading}
+              style={{ display: "none" }}
+            />
+          </label>
+        </div>
       </div>
+
+      <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.25)", marginBottom: "6px" }}>
+        Podržano: La Growth Machine export, Apollo CSV. Matching po linkedin_url (primarno) i email (fallback).
+      </p>
 
       {/* Feedback */}
       {error && (
@@ -127,14 +172,9 @@ export default function ContactedHistorySection({ clientId }: { clientId: string
         </p>
       )}
 
-      {/* Format hint */}
-      <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.25)", marginBottom: expanded ? "16px" : "0" }}>
-        Podržano: La Growth Machine export, Apollo CSV. Matching po linkedin_url (primarno) i email (fallback).
-      </p>
-
       {/* Batch list */}
       {expanded && (
-        <div>
+        <div style={{ marginTop: "12px" }}>
           {loading ? (
             <p style={{ fontSize: "13px", color: "rgba(255,255,255,0.35)", padding: "16px 0" }}>Učitavanje…</p>
           ) : batches.length === 0 ? (
@@ -161,8 +201,10 @@ export default function ContactedHistorySection({ clientId }: { clientId: string
                     <p style={{ fontSize: "13px", fontWeight: 600, color: "#FFFFFF", margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {b.batch_name}
                     </p>
-                    <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.4)", margin: "2px 0 0" }}>
-                      {SOURCE_LABEL[b.source] ?? b.source} · {fmtDate(b.uploaded_at)}
+                    <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.4)", margin: "2px 0 0", display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                      <span>{SOURCE_LABEL[b.source] ?? b.source}</span>
+                      {b.sender_profile_name && <span>· {b.sender_profile_name}</span>}
+                      <span>· {fmtDate(b.uploaded_at)}</span>
                     </p>
                   </div>
                   <span style={{ fontSize: "12px", fontWeight: 600, color: "#FFCC00", whiteSpace: "nowrap" }}>

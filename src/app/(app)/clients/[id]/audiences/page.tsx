@@ -11,17 +11,24 @@ export default async function AudiencesPage({
   const { id } = await params;
   const supabase = await createClient();
 
-  const [{ data: clientData }, { data: audiencesData }] = await Promise.all([
+  const [{ data: clientData }, { data: audiencesData }, { data: profilesData }] = await Promise.all([
     supabase.from("clients").select("id, name").eq("id", id).maybeSingle(),
     supabase
       .from("audiences")
       .select("id, name, source, row_count, created_at, campaigns(name), icp_profiles(name)")
       .eq("client_id", id)
       .order("created_at", { ascending: false }),
+    supabase
+      .from("sender_profiles")
+      .select("id, name")
+      .eq("client_id", id)
+      .eq("is_active", true)
+      .order("rotation_order"),
   ]);
 
   if (!clientData) notFound();
   const audiences = (audiencesData ?? []) as any[];
+  const senderProfiles = (profilesData ?? []) as { id: string; name: string }[];
 
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#272727", padding: "32px" }}>
@@ -124,7 +131,7 @@ export default async function AudiencesPage({
         </div>
       )}
 
-      <ContactedHistorySection clientId={id} />
+      <ContactedHistorySection clientId={id} senderProfiles={senderProfiles} />
     </div>
   );
 }
