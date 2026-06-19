@@ -19,6 +19,12 @@ const NAV = [
   },
 ];
 
+// Deploy identity — Vercel injects these system env vars on every build, so
+// the badge changes with each push. Lets us confirm at a glance which version
+// is live ("aha, my push deployed").
+const COMMIT_SHA = (process.env.VERCEL_GIT_COMMIT_SHA ?? "").slice(0, 7) || "local";
+const COMMIT_MSG = (process.env.VERCEL_GIT_COMMIT_MESSAGE ?? "").split("\n")[0];
+
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await requireUser();
 
@@ -91,6 +97,22 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               Sign out →
             </button>
           </form>
+
+          {/* Deploy / version badge */}
+          <div
+            className="mt-3 rounded-lg px-3 py-2"
+            style={{ backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
+            title={COMMIT_MSG || "Lokalni build"}
+          >
+            <p className="text-xs font-mono" style={{ color: "rgba(255,255,255,0.45)", fontFamily: "monospace" }}>
+              <span style={{ color: "#86EFAC" }}>●</span> v{COMMIT_SHA}
+            </p>
+            {COMMIT_MSG && (
+              <p className="mt-0.5 truncate text-xs" style={{ color: "rgba(255,255,255,0.3)" }}>
+                {COMMIT_MSG}
+              </p>
+            )}
+          </div>
         </div>
       </aside>
 
