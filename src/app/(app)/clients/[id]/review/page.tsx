@@ -93,11 +93,6 @@ export default async function ClientReviewPage({
     if (!selectedAudience.sender_profiles?.heyreach_account_id)
       heyreachIssues.push("Sender profile nema HeyReach account ID (Senders → settings).");
   }
-  // Does the sequence actually use {personalization}? If so, push requires it per lead.
-  const requiresPersonalization = sequenceSteps.some((s) =>
-    /\{\s*personal/i.test(String(s.template_text ?? ""))
-  );
-
   return (
     <div>
       <Link href={`/clients/${id}`} style={{ fontSize: "12px", color: "rgba(255,255,255,0.4)", textDecoration: "none", display: "inline-block", marginBottom: "16px" }}>
@@ -191,10 +186,9 @@ export default async function ClientReviewPage({
                   clientId={id}
                   audienceId={selectedAudience.id}
                   campaignName={selectedAudience.campaigns?.name ?? selectedAudience.name}
-                  initialTemplate={(selectedAudience.source_meta as any)?.message_template ?? ""}
+                  initialBrief={(selectedAudience.source_meta as any)?.message_brief ?? ""}
                   sequenceSteps={sequenceSteps}
                   heyreachIssues={heyreachIssues}
-                  requiresPersonalization={requiresPersonalization}
                 />
               )
             ) : null}

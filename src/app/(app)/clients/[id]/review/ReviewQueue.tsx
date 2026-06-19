@@ -2,22 +2,9 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { setMemberReviewStatus, bulkSetReviewStatus, updateMemberPersonalization } from "@/app/actions/review";
+import { setMemberReviewStatus, bulkSetReviewStatus, updateMemberMessage } from "@/app/actions/review";
 import { downloadCsv } from "@/lib/csv-export";
-import { renderTemplateSegments } from "@/lib/message-preview";
-
-interface SequenceStep {
-  step_order: number;
-  channel: string;
-  template_text: string;
-  delay_days: number;
-}
-
-const CHANNEL_LABEL: Record<string, string> = {
-  connection_request: "Connection request",
-  message: "Poruka",
-  inmail: "InMail",
-};
+import { nameSequenceSteps, type SeqStep, type NamedStep } from "@/lib/sequence";
 
 interface Lead {
   id: string;
@@ -40,6 +27,7 @@ interface Lead {
     priority?: string;
     score_explanation?: string;
     personalization?: string;
+    rendered_messages?: Record<string, string>;
   };
 }
 
@@ -57,20 +45,80 @@ const PRIORITY_BORDER: Record<string, string> = {
   tier_4: "rgba(255,255,255,0.06)",
 };
 
+// Which steps actually require a rendered message before push (operator wrote a template).
+function requiredSteps(named: NamedStep[]): NamedStep[] {
+  return named.filter((s) => (s.template_text ?? "").trim());
+}
+
+function leadMissingMessages(lead: Lead, named: NamedStep[]): boolean {
+  const rm = lead.raw.rendered_messages ?? {};
+  return requiredSteps(named).some((s) => !(rm[String(s.step_order)] ?? "").trim());
+}
+
+function StepEditor({
+  step,
+  initial,
+  onSave,
+}: {
+  step: NamedStep;
+  initial: string;
+  onSave: (text: string) => Promise<void>;
+}) {
+  const [text, setText] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const dirty = text !== initial;
+  const empty = !text.trim();
+
+  async function save() {
+    setSaving(true);
+    await onSave(text);
+    setSaving(false);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1500);
+  }
+
+  return (
+    <div style={{ backgroundColor: "rgba(165,180,252,0.05)", border: `1px solid ${empty ? "rgba(248,113,113,0.3)" : "rgba(165,180,252,0.15)"}`, borderRadius: "10px", padding: "10px 12px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px", flexWrap: "wrap" }}>
+        <span style={{ fontSize: "11px", fontWeight: 700, color: "#A5B4FC" }}>{step.step_order}. {step.label}</span>
+        <span title="Referenciraj ovu varijablu u HeyReach sekvenci"
+          style={{ fontSize: "10px", fontFamily: "monospace", color: "rgba(255,255,255,0.5)", backgroundColor: "rgba(255,255,255,0.06)", borderRadius: "4px", padding: "1px 6px" }}>
+          {`{{${step.variableName}}}`}
+        </span>
+        {step.delay_days ? <span style={{ fontSize: "10px", color: "rgba(255,255,255,0.3)" }}>+{step.delay_days}d</span> : null}
+        {empty && <span style={{ fontSize: "10px", color: "#F87171" }}>⚠ nije generisano</span>}
+      </div>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={Math.max(2, Math.min(6, text.split("\n").length + 1))}
+        placeholder={`Template: ${step.template_text}`}
+        style={{ backgroundColor: "#272727", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "8px", color: "#FFFFFF", padding: "8px 10px", fontSize: "12px", width: "100%", outline: "none", resize: "vertical", lineHeight: 1.5 }}
+      />
+      <div style={{ display: "flex", alignItems: "center", gap: "10px", marginTop: "6px" }}>
+        <button onClick={save} disabled={saving || !dirty}
+          style={{ backgroundColor: dirty ? "#FFCC00" : "rgba(255,255,255,0.08)", color: dirty ? "#272727" : "rgba(255,255,255,0.4)", fontWeight: 600, borderRadius: "8px", padding: "4px 12px", fontSize: "12px", border: "none", cursor: saving || !dirty ? "default" : "pointer", opacity: saving ? 0.6 : 1 }}>
+          {saving ? "Čuvam…" : saved ? "✓ Sačuvano" : "Sačuvaj"}
+        </button>
+        <span style={{ fontSize: "10px", color: "rgba(255,255,255,0.3)" }}>Template: {step.template_text}</span>
+      </div>
+    </div>
+  );
+}
+
 function LeadCard({
   lead,
   clientId,
   selected,
   onSelect,
-  sequenceSteps,
-  requiresPersonalization,
+  namedSteps,
 }: {
   lead: Lead;
   clientId: string;
   selected: boolean;
   onSelect: (id: string) => void;
-  sequenceSteps: SequenceStep[];
-  requiresPersonalization: boolean;
+  namedSteps: NamedStep[];
 }) {
   const [isPending, startTransition] = useTransition();
   const r = lead.raw;
@@ -81,39 +129,23 @@ function LeadCard({
   const accentColor = PRIORITY_ACCENT[priority] ?? "rgba(255,255,255,0.35)";
   const borderColor = PRIORITY_BORDER[priority] ?? "rgba(255,255,255,0.06)";
 
-  const [msg, setMsg] = useState(r.personalization ?? "");
-  const [editing, setEditing] = useState(false);
-  const [savingMsg, setSavingMsg] = useState(false);
-  const [showPreview, setShowPreview] = useState(false);
+  const [showMsgs, setShowMsgs] = useState(false);
+  const rendered = r.rendered_messages ?? {};
+  const required = requiredSteps(namedSteps);
 
-  // Pre-push blockers for this lead
   const missingLinkedIn = !r.linkedin_url;
-  const missingPersonalization = requiresPersonalization && !msg.trim();
+  const missingMsgs = leadMissingMessages(lead, namedSteps);
   const blockers: string[] = [];
   if (missingLinkedIn) blockers.push("nema LinkedIn URL");
-  if (missingPersonalization) blockers.push("nema personalizaciju");
-
-  // Build the per-lead preview from the *current* edited message
-  const previewLead = { ...r, personalization: msg };
-  let messageNo = 0;
+  if (missingMsgs) blockers.push("nema poruku");
 
   function toggle(status: "approved" | "rejected") {
-    startTransition(() =>
-      setMemberReviewStatus(lead.id, status, clientId, lead.audience_id)
-    );
-  }
-
-  async function saveMsg() {
-    setSavingMsg(true);
-    await updateMemberPersonalization(lead.id, msg, clientId, lead.audience_id);
-    setSavingMsg(false);
-    setEditing(false);
+    startTransition(() => setMemberReviewStatus(lead.id, status, clientId, lead.audience_id));
   }
 
   return (
     <div style={{ backgroundColor: "#303030", border: `1px solid ${borderColor}`, borderRadius: "14px", padding: "16px", opacity: isPending ? 0.6 : 1, borderLeft: `3px solid ${accentColor}` }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: "12px" }}>
-        {/* Checkbox */}
         <input
           type="checkbox"
           checked={selected}
@@ -121,7 +153,6 @@ function LeadCard({
           style={{ marginTop: "4px", width: "16px", height: "16px", accentColor: "#FFCC00", flexShrink: 0 }}
         />
 
-        {/* Content */}
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px" }}>
             <div style={{ minWidth: 0, flex: 1 }}>
@@ -152,7 +183,6 @@ function LeadCard({
               </p>
             </div>
 
-            {/* Actions */}
             <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
               <button
                 onClick={() => toggle("approved")}
@@ -184,89 +214,39 @@ function LeadCard({
             </p>
           )}
 
-          {/* Outgoing message (personalization custom variable pushed to HeyReach) */}
-          <div style={{ marginTop: "10px", backgroundColor: "rgba(165,180,252,0.06)", border: "1px solid rgba(165,180,252,0.15)", borderRadius: "10px", padding: "10px 12px" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", marginBottom: "4px" }}>
-              <span style={{ fontSize: "11px", fontWeight: 600, color: "#A5B4FC" }}>Poruka koja ide u HeyReach</span>
-              {!editing && (
-                <button onClick={() => setEditing(true)}
-                  style={{ fontSize: "11px", color: "#A5B4FC", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
-                  Izmeni
-                </button>
-              )}
-            </div>
-            {editing ? (
-              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                <textarea
-                  value={msg}
-                  onChange={(e) => setMsg(e.target.value)}
-                  rows={3}
-                  placeholder="Tekst koji se ubacuje na mesto {personalization}…"
-                  style={{ backgroundColor: "#272727", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "8px", color: "#FFFFFF", padding: "8px 10px", fontSize: "12px", width: "100%", outline: "none", resize: "vertical", lineHeight: 1.5 }}
-                />
-                <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-                  <button onClick={saveMsg} disabled={savingMsg}
-                    style={{ backgroundColor: "#FFCC00", color: "#272727", fontWeight: 600, borderRadius: "8px", padding: "5px 12px", fontSize: "12px", border: "none", cursor: savingMsg ? "not-allowed" : "pointer", opacity: savingMsg ? 0.6 : 1 }}>
-                    {savingMsg ? "Čuvam…" : "Sačuvaj"}
-                  </button>
-                  <button onClick={() => { setMsg(r.personalization ?? ""); setEditing(false); }}
-                    style={{ fontSize: "12px", color: "rgba(255,255,255,0.4)", background: "none", border: "none", cursor: "pointer" }}>
-                    Otkaži
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <p style={{ fontSize: "12px", color: msg ? "#E0E0E0" : "rgba(255,255,255,0.3)", fontStyle: msg ? "normal" : "italic", whiteSpace: "pre-wrap", margin: 0, lineHeight: 1.5 }}>
-                {msg || "Nema poruke — klikni Izmeni ili regeneriši batch."}
-              </p>
-            )}
-          </div>
-
-          {/* Full sequence preview — exactly what the lead receives, personalization filled */}
-          {sequenceSteps.length > 0 && (
-            <div style={{ marginTop: "8px" }}>
-              <button onClick={() => setShowPreview((v) => !v)}
-                style={{ display: "flex", alignItems: "center", gap: "6px", background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: "11px", fontWeight: 600, color: "rgba(255,255,255,0.5)" }}>
-                <span>Pregled cele sekvence ({sequenceSteps.length})</span>
-                <span style={{ display: "inline-block", transform: showPreview ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>▾</span>
+          {/* Editable per-step messages (the text pushed to HeyReach per variable) */}
+          {required.length > 0 ? (
+            <div style={{ marginTop: "10px" }}>
+              <button onClick={() => setShowMsgs((v) => !v)}
+                style={{ display: "flex", alignItems: "center", gap: "8px", background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: "12px", fontWeight: 600, color: "#A5B4FC" }}>
+                <span>Poruke za ovog leada ({required.length})</span>
+                <span style={{ fontSize: "11px", color: missingMsgs ? "#F87171" : "rgba(255,255,255,0.35)" }}>
+                  {missingMsgs ? "⚠ neke nisu generisane" : "✓ spremno"}
+                </span>
+                <span style={{ display: "inline-block", transform: showMsgs ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>▾</span>
               </button>
-              {showPreview && (
+              {showMsgs && (
                 <div style={{ marginTop: "8px", display: "flex", flexDirection: "column", gap: "8px" }}>
-                  {sequenceSteps.map((step) => {
-                    const isMsg = step.channel === "message";
-                    if (isMsg) messageNo++;
-                    const label = step.channel === "message"
-                      ? `Poruka ${messageNo}`
-                      : CHANNEL_LABEL[step.channel] ?? step.channel;
-                    const segments = renderTemplateSegments(step.template_text ?? "", previewLead);
-                    return (
-                      <div key={step.step_order} style={{ backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "8px", padding: "8px 10px" }}>
-                        <div style={{ fontSize: "10px", fontWeight: 600, color: "rgba(255,255,255,0.4)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "4px", display: "flex", gap: "8px" }}>
-                          <span>{step.step_order}. {label}</span>
-                          {step.delay_days > 0 && <span style={{ color: "rgba(255,255,255,0.25)" }}>+{step.delay_days}d</span>}
-                        </div>
-                        <p style={{ fontSize: "12px", lineHeight: 1.55, margin: 0, whiteSpace: "pre-wrap" }}>
-                          {segments.map((seg, i) => (
-                            <span key={i} style={
-                              seg.kind === "personalization"
-                                ? { color: "#A5B4FC", backgroundColor: "rgba(165,180,252,0.12)", borderRadius: "3px", padding: "0 2px" }
-                                : seg.kind === "missing"
-                                  ? { color: "#F87171", fontStyle: "italic" }
-                                  : { color: "#E0E0E0" }
-                            }>{seg.text}</span>
-                          ))}
-                        </p>
-                      </div>
-                    );
-                  })}
+                  {required.map((step) => (
+                    <StepEditor
+                      key={step.step_order}
+                      step={step}
+                      initial={rendered[String(step.step_order)] ?? ""}
+                      onSave={(text) => updateMemberMessage(lead.id, step.step_order, text, clientId)}
+                    />
+                  ))}
                 </div>
               )}
             </div>
+          ) : (
+            <p style={{ marginTop: "10px", fontSize: "12px", color: "rgba(255,255,255,0.35)", fontStyle: "italic" }}>
+              Kampanja nema sequence poruke. Dodaj korake u Campaigns da bi se generisale poruke.
+            </p>
           )}
 
           {/* Qualify reason */}
           {lead.qualify_reason && (
-            <p style={{ marginTop: "4px", fontSize: "11px", color: "rgba(255,255,255,0.35)" }}>
+            <p style={{ marginTop: "8px", fontSize: "11px", color: "rgba(255,255,255,0.35)" }}>
               Izvor: {lead.qualify_source?.replace("_", " ")} — {lead.qualify_reason}
             </p>
           )}
@@ -281,44 +261,44 @@ export default function ReviewQueue({
   clientId,
   audienceId,
   campaignName,
-  initialTemplate,
+  initialBrief,
   sequenceSteps,
   heyreachIssues,
-  requiresPersonalization,
 }: {
   leads: Lead[];
   clientId: string;
   audienceId: string;
   campaignName: string;
-  initialTemplate: string;
-  sequenceSteps: SequenceStep[];
+  initialBrief: string;
+  sequenceSteps: SeqStep[];
   heyreachIssues: string[];
-  requiresPersonalization: boolean;
 }) {
   const router = useRouter();
+  const namedSteps = nameSequenceSteps(sequenceSteps);
+  const required = requiredSteps(namedSteps);
+
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [tab, setTab] = useState<"all" | "pending" | "approved" | "rejected">("all");
   const [isPending, startTransition] = useTransition();
   const [pushStatus, setPushStatus] = useState<string | null>(null);
 
-  // Batch message regeneration
+  // Batch message generation
   const [showRegen, setShowRegen] = useState(false);
-  const [template, setTemplate] = useState(initialTemplate);
+  const [brief, setBrief] = useState(initialBrief);
   const [regenScope, setRegenScope] = useState<"all" | "pending" | "approved">("all");
   const [regenStatus, setRegenStatus] = useState<string | null>(null);
 
   async function regenerateMessages() {
-    if (!template.trim()) { setRegenStatus("✗ Upiši template."); return; }
     setRegenStatus("regen");
     try {
       const res = await fetch(`/api/review/${audienceId}/regenerate-messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ template, scope: regenScope }),
+        body: JSON.stringify({ brief, scope: regenScope }),
       });
       const body = await res.json();
-      if (!res.ok) throw new Error(body.error ?? "Regeneracija nije uspela.");
-      setRegenStatus(`✓ Regenerisano ${body.updated} poruka${body.failed ? `, ${body.failed} neuspelih` : ""}`);
+      if (!res.ok) throw new Error(body.error ?? "Generisanje nije uspelo.");
+      setRegenStatus(`✓ Generisano za ${body.updated} leadova${body.failed ? `, ${body.failed} neuspelih` : ""}`);
       router.refresh();
     } catch (e: any) {
       setRegenStatus(`✗ ${e.message}`);
@@ -329,6 +309,12 @@ export default function ReviewQueue({
   const approvedCount = leads.filter((l) => l.review_status === "approved").length;
   const pendingCount = leads.filter((l) => l.review_status === "pending").length;
 
+  // Approved leads that would be skipped on push
+  const approvedBlocked = leads.filter((l) => {
+    if (l.review_status !== "approved") return false;
+    return !l.raw.linkedin_url || leadMissingMessages(l, namedSteps);
+  }).length;
+
   function toggleSelect(id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -337,13 +323,8 @@ export default function ReviewQueue({
     });
   }
 
-  function selectAll() {
-    setSelected(new Set(filtered.map((l) => l.id)));
-  }
-
-  function clearSelection() {
-    setSelected(new Set());
-  }
+  function selectAll() { setSelected(new Set(filtered.map((l) => l.id))); }
+  function clearSelection() { setSelected(new Set()); }
 
   function bulkAction(status: "approved" | "rejected") {
     const ids = Array.from(selected);
@@ -375,14 +356,6 @@ export default function ReviewQueue({
       setPushStatus(`✗ ${e.message}`);
     }
   }
-
-  // Approved leads that would be skipped on push (missing required fields)
-  const approvedBlocked = leads.filter((l) => {
-    if (l.review_status !== "approved") return false;
-    const noLi = !l.raw.linkedin_url;
-    const noPers = requiresPersonalization && !(l.raw.personalization ?? "").trim();
-    return noLi || noPers;
-  }).length;
 
   return (
     <div>
@@ -443,61 +416,72 @@ export default function ReviewQueue({
           <ul style={{ margin: "4px 0 0", paddingLeft: "18px", color: "#E0C77A" }}>
             {heyreachIssues.map((issue, i) => <li key={i}>{issue}</li>)}
             {approvedBlocked > 0 && (
-              <li>{approvedBlocked} approved {approvedBlocked === 1 ? "lead" : "leadova"} će biti preskočeno (fali LinkedIn URL{requiresPersonalization ? " ili personalizacija" : ""}). Vidi ⚠ oznake na karticama.</li>
+              <li>{approvedBlocked} approved {approvedBlocked === 1 ? "lead" : "leadova"} će biti preskočeno (fali LinkedIn URL ili poruka). Vidi ⚠ oznake na karticama.</li>
             )}
           </ul>
         </div>
       )}
 
-      {/* Batch message regeneration */}
+      {/* Batch message generation */}
       <div style={{ marginBottom: "16px", backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "12px", padding: "12px 14px" }}>
         <button
           onClick={() => setShowRegen((v) => !v)}
           style={{ display: "flex", alignItems: "center", gap: "8px", background: "none", border: "none", cursor: "pointer", padding: 0, width: "100%", textAlign: "left" }}
         >
-          <span style={{ fontSize: "13px", fontWeight: 600, color: "#FFFFFF" }}>Regeneriši poruke za batch</span>
+          <span style={{ fontSize: "13px", fontWeight: 600, color: "#FFFFFF" }}>Generiši poruke za batch</span>
           <span style={{ fontSize: "11px", color: "rgba(255,255,255,0.35)" }}>
-            AI ispisuje novu {"{personalization}"} po leadu iz tvog template-a
+            AI piše cele poruke iz template-a kampanje, popunjava [zagrade], vokativ + srpski
           </span>
           <span style={{ marginLeft: "auto", fontSize: "11px", color: "rgba(255,255,255,0.35)", transform: showRegen ? "rotate(180deg)" : "none" }}>▾</span>
         </button>
 
         {showRegen && (
           <div style={{ marginTop: "12px", display: "flex", flexDirection: "column", gap: "10px" }}>
-            <textarea
-              value={template}
-              onChange={(e) => setTemplate(e.target.value)}
-              rows={4}
-              placeholder="Npr: Napiši ležeran 1-liner koji referencira njihovu poziciju i industriju, bez prodaje, kao da pišeš kolegi."
-              style={{ backgroundColor: "#272727", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "8px", color: "#FFFFFF", padding: "10px 12px", fontSize: "13px", width: "100%", outline: "none", resize: "vertical", lineHeight: 1.5 }}
-            />
-            <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
-              <label style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)", display: "flex", alignItems: "center", gap: "6px" }}>
-                Za:
-                <select
-                  value={regenScope}
-                  onChange={(e) => setRegenScope(e.target.value as any)}
-                  style={{ backgroundColor: "#272727", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "8px", color: "#FFFFFF", padding: "6px 10px", fontSize: "12px", outline: "none" }}
-                >
-                  <option value="all">sve qualified ({leads.length})</option>
-                  <option value="pending">samo na čekanju ({pendingCount})</option>
-                  <option value="approved">samo approved ({approvedCount})</option>
-                </select>
-              </label>
-              <button
-                onClick={regenerateMessages}
-                disabled={regenStatus === "regen"}
-                style={{ backgroundColor: "#A5B4FC", color: "#272727", fontWeight: 600, borderRadius: "10px", padding: "8px 16px", fontSize: "13px", border: "none", cursor: regenStatus === "regen" ? "not-allowed" : "pointer", opacity: regenStatus === "regen" ? 0.6 : 1 }}
-              >
-                {regenStatus === "regen" ? "Generišem… (može potrajati)" : "Regeneriši poruke"}
-              </button>
-              {regenStatus && regenStatus !== "regen" && (
-                <span style={{ fontSize: "12px", color: regenStatus.startsWith("✓") ? "#86EFAC" : "#F87171" }}>{regenStatus}</span>
-              )}
-            </div>
-            <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.3)", margin: 0 }}>
-              Prepisuje postojeće poruke za izabrani skup. Veliki batch-evi mogu zahtevati ponovni klik ako istekne vreme.
-            </p>
+            {required.length === 0 ? (
+              <p style={{ fontSize: "12px", color: "#F87171", margin: 0 }}>
+                Kampanja nema sequence poruke. Dodaj korake (Poruka 1/2…) u Campaigns, sa [zagradama] gde želiš personalizaciju.
+              </p>
+            ) : (
+              <>
+                <div style={{ fontSize: "11px", color: "rgba(255,255,255,0.4)" }}>
+                  Generiše iz: {required.map((s) => s.label).join(", ")}
+                </div>
+                <textarea
+                  value={brief}
+                  onChange={(e) => setBrief(e.target.value)}
+                  rows={2}
+                  placeholder="Opciono: dodatni brief za stil/sadržaj personalizacije (npr. ton, šta da naglasi u [zagradama])."
+                  style={{ backgroundColor: "#272727", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "8px", color: "#FFFFFF", padding: "10px 12px", fontSize: "13px", width: "100%", outline: "none", resize: "vertical", lineHeight: 1.5 }}
+                />
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                  <label style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)", display: "flex", alignItems: "center", gap: "6px" }}>
+                    Za:
+                    <select
+                      value={regenScope}
+                      onChange={(e) => setRegenScope(e.target.value as any)}
+                      style={{ backgroundColor: "#272727", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "8px", color: "#FFFFFF", padding: "6px 10px", fontSize: "12px", outline: "none" }}
+                    >
+                      <option value="all">sve qualified ({leads.length})</option>
+                      <option value="pending">samo na čekanju ({pendingCount})</option>
+                      <option value="approved">samo approved ({approvedCount})</option>
+                    </select>
+                  </label>
+                  <button
+                    onClick={regenerateMessages}
+                    disabled={regenStatus === "regen"}
+                    style={{ backgroundColor: "#A5B4FC", color: "#272727", fontWeight: 600, borderRadius: "10px", padding: "8px 16px", fontSize: "13px", border: "none", cursor: regenStatus === "regen" ? "not-allowed" : "pointer", opacity: regenStatus === "regen" ? 0.6 : 1 }}
+                  >
+                    {regenStatus === "regen" ? "Generišem… (može potrajati)" : "Generiši poruke"}
+                  </button>
+                  {regenStatus && regenStatus !== "regen" && (
+                    <span style={{ fontSize: "12px", color: regenStatus.startsWith("✓") ? "#86EFAC" : "#F87171" }}>{regenStatus}</span>
+                  )}
+                </div>
+                <p style={{ fontSize: "11px", color: "rgba(255,255,255,0.3)", margin: 0 }}>
+                  Prepisuje sve poruke za izabrani skup. Veliki batch-evi mogu zahtevati ponovni klik ako istekne vreme.
+                </p>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -533,8 +517,7 @@ export default function ReviewQueue({
               clientId={clientId}
               selected={selected.has(lead.id)}
               onSelect={toggleSelect}
-              sequenceSteps={sequenceSteps}
-              requiresPersonalization={requiresPersonalization}
+              namedSteps={namedSteps}
             />
           ))
         )}

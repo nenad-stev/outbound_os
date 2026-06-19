@@ -14,6 +14,86 @@ export interface MessageGenLead {
   linkedin_about?: string;
 }
 
+interface RenderStep {
+  step_order: number;
+  label: string;        // "Poruka 1", "Connection request"…
+  template_text: string;
+}
+
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001";
+
+// Render full per-lead messages for every sequence step in ONE AI call.
+// Keeps the operator's template verbatim, fills [bracketed] slots with
+// personalized Serbian text, substitutes {placeholders} (names in correct
+// Serbian VOCATIVE case), and writes everything in Serbian.
+export async function renderLeadMessages(
+  steps: RenderStep[],
+  lead: MessageGenLead,
+  anthropicKey: string,
+  extraBrief?: string
+): Promise<{ ok: boolean; messages: Record<string, string>; error?: string }> {
+  const name = lead.full_name || `${lead.first_name ?? ""} ${lead.last_name ?? ""}`.trim();
+  const usable = steps.filter((s) => (s.template_text ?? "").trim());
+  if (usable.length === 0) return { ok: false, messages: {}, error: "Nema template-a u sekvenci." };
+
+  const stepsBlock = usable
+    .map((s) => `${s.step_order}. (${s.label}): ${s.template_text}`)
+    .join("\n");
+
+  const prompt = `Ti si copywriter za B2B LinkedIn outreach koji piše ISKLJUČIVO na srpskom jeziku.
+
+Dobijaš poruke iz sekvence. Za SVAKU vrati finalnu verziju po ovim pravilima:
+1. Zadrži tekst i ton tačno kako jeste — ne preuređuj rečenice koje nisu u zagradama.
+2. Tekst u UGLASTIM zagradama [ ... ] je uputstvo šta treba da napišeš na tom mestu. Zameni CELU zagradu (sa [ i ]) kratkim, konkretnim, personalizovanim tekstom na srpskom za ovu osobu/firmu. NIKAD ne ostavljaj uglaste zagrade u rezultatu.
+3. Vitičaste oznake {first_name}, {company}, {title} itd. zameni stvarnim podacima osobe.
+4. Imena osoba MORAJU biti u pravilnom srpskom VOKATIVU kada se neko oslovljava. Primeri: "Zdravo {first_name}" → "Zdravo Vladimire" (Vladimir), "Zdravo Marko" → "Zdravo Marko", "Zdravo Miloš" → "Zdravo Miloše", "Zdravo Stefan" → "Zdravo Stefane", "Zdravo Ana" → "Zdravo Ana", "Zdravo Jovana" → "Zdravo Jovana", "Zdravo Nikola" → "Zdravo Nikola", "Zdravo Đorđe" → "Zdravo Đorđe".
+5. SVE mora biti na srpskom (osim naziva firmi/brendova). Bez navodnika oko cele poruke, bez potpisa, bez objašnjenja.
+${extraBrief ? `6. Dodatno uputstvo za stil/sadržaj personalizacije: ${extraBrief}\n` : ""}
+PODACI O OSOBI:
+Ime: ${name || "Nepoznato"}
+Pozicija: ${lead.title ?? "Nepoznato"}
+Firma: ${lead.company_name ?? "Nepoznato"}
+Industrija: ${lead.industry ?? "Nepoznato"}
+Lokacija: ${lead.location ?? "Nepoznato"}
+${lead.bio_text ? `LinkedIn headline: ${lead.bio_text}` : ""}
+${lead.linkedin_about ? `LinkedIn about: ${lead.linkedin_about.slice(0, 1000)}` : ""}
+
+PORUKE:
+${stepsBlock}
+
+Vrati SAMO JSON objekat gde je ključ broj poruke (kao string), a vrednost finalni tekst. Primer: {"1": "...", "2": "..."}`;
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": anthropicKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 1200,
+        messages: [{ role: "user", content: prompt }],
+      }),
+      signal: AbortSignal.timeout(40_000),
+    });
+    if (!res.ok) return { ok: false, messages: {}, error: `Anthropic ${res.status}` };
+    const json = await res.json();
+    const text: string = json?.content?.[0]?.text ?? "{}";
+    const parsed = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+    const messages: Record<string, string> = {};
+    for (const s of usable) {
+      const v = parsed[String(s.step_order)] ?? parsed[s.step_order];
+      if (typeof v === "string" && v.trim()) messages[String(s.step_order)] = v.trim();
+    }
+    if (Object.keys(messages).length === 0) return { ok: false, messages: {}, error: "Prazan odgovor." };
+    return { ok: true, messages };
+  } catch (e) {
+    return { ok: false, messages: {}, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function generateMessage(
   template: string,
   lead: MessageGenLead,

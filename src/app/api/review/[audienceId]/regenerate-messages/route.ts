@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { requireRole } from "@/lib/auth";
-import { generateMessage, type MessageGenLead } from "@/lib/message-gen";
+import { renderLeadMessages, type MessageGenLead } from "@/lib/message-gen";
+import { nameSequenceSteps } from "@/lib/sequence";
 
 export const maxDuration = 60;
 
-// Regenerate the per-lead `personalization` message for qualified leads in an
-// audience from an operator-supplied template/brief. Runs with limited
-// concurrency to fit the request window; large batches may need a re-run.
+// Regenerate full per-lead messages for every sequence step of an audience's
+// campaign, from the operator's step templates (with [bracketed] slots filled
+// and names in Serbian vocative). Stored in raw.rendered_messages keyed by
+// step_order. Runs with limited concurrency; large batches may need a re-run.
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ audienceId: string }> }
@@ -20,25 +22,43 @@ export async function POST(
 
   const { audienceId } = await params;
   const body = (await req.json().catch(() => ({}))) as {
-    template?: string;
+    brief?: string;
     scope?: "all" | "pending" | "approved";
   };
-  const template = (body.template ?? "").trim();
-  if (!template) return NextResponse.json({ error: "Template je prazan." }, { status: 400 });
+  const brief = (body.brief ?? "").trim() || undefined;
 
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   if (!anthropicKey) return NextResponse.json({ error: "ANTHROPIC_API_KEY nije podešen." }, { status: 500 });
 
   const supabase = await createClient();
 
-  // Persist the template on the audience so it's remembered next time.
+  // Resolve the audience's campaign and its sequence steps (the templates).
   const { data: aud } = await supabase
     .from("audiences")
-    .select("source_meta")
+    .select("campaign_id, source_meta")
     .eq("id", audienceId)
     .maybeSingle();
-  const source_meta = { ...((aud?.source_meta as Record<string, unknown>) ?? {}), message_template: template };
-  await supabase.from("audiences").update({ source_meta }).eq("id", audienceId);
+  if (!aud?.campaign_id) {
+    return NextResponse.json({ error: "Audience nema kampanju." }, { status: 400 });
+  }
+
+  const { data: stepRows } = await supabase
+    .from("sequence_steps")
+    .select("step_order, channel, template_text, delay_days")
+    .eq("campaign_id", aud.campaign_id)
+    .order("step_order");
+
+  const named = nameSequenceSteps((stepRows ?? []) as any[]);
+  const renderSteps = named.map((s) => ({ step_order: s.step_order, label: s.label, template_text: s.template_text }));
+  if (renderSteps.every((s) => !(s.template_text ?? "").trim())) {
+    return NextResponse.json({ error: "Sekvenca nema poruke. Dodaj korake u Campaigns." }, { status: 400 });
+  }
+
+  // Persist the brief on the audience so it's remembered next time.
+  if (brief !== undefined) {
+    const source_meta = { ...((aud.source_meta as Record<string, unknown>) ?? {}), message_brief: brief ?? "" };
+    await supabase.from("audiences").update({ source_meta }).eq("id", audienceId);
+  }
 
   let query = supabase
     .from("audience_members")
@@ -55,7 +75,7 @@ export async function POST(
 
   let updated = 0;
   let failed = 0;
-  const CONCURRENCY = 6;
+  const CONCURRENCY = 5;
 
   for (let i = 0; i < members.length; i += CONCURRENCY) {
     const batch = members.slice(i, i + CONCURRENCY);
@@ -73,9 +93,9 @@ export async function POST(
           bio_text: r.bio_text,
           linkedin_about: r.linkedin_about ?? r.about,
         };
-        const res = await generateMessage(template, lead, anthropicKey);
+        const res = await renderLeadMessages(renderSteps, lead, anthropicKey, brief);
         if (!res.ok) { failed++; return; }
-        const raw = { ...r, personalization: res.text };
+        const raw = { ...r, rendered_messages: res.messages };
         const { error: updErr } = await supabase
           .from("audience_members")
           .update({ raw })

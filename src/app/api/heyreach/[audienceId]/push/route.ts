@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { nameSequenceSteps } from "@/lib/sequence";
 
 const HEYREACH_BASE = process.env.HEYREACH_BASE_URL ?? "https://api.heyreach.io/api/public";
 const HEYREACH_KEY = process.env.HEYREACH_API_KEY ?? "";
@@ -39,15 +40,14 @@ export async function POST(
     );
   }
 
-  // Does the campaign sequence actually reference {personalization}? If so,
-  // a lead without it would receive a broken message — so we require it.
-  const { data: steps } = await supabase
+  // Sequence steps → named HeyReach variables. Steps with a template require a
+  // rendered per-lead message before push.
+  const { data: stepRows } = await supabase
     .from("sequence_steps")
-    .select("template_text")
+    .select("step_order, channel, template_text, delay_days")
     .eq("campaign_id", aud.campaign_id);
-  const requiresPersonalization = (steps ?? []).some((s: any) =>
-    /\{\s*personal/i.test(String(s.template_text ?? ""))
-  );
+  const namedSteps = nameSequenceSteps((stepRows ?? []) as any[]);
+  const requiredSteps = namedSteps.filter((s) => (s.template_text ?? "").trim());
 
   // Load approved members not yet pushed
   const { data: members, error: memErr } = await supabase
@@ -70,8 +70,10 @@ export async function POST(
     const r = m.raw as any;
     const name = r.full_name || `${r.first_name ?? ""} ${r.last_name ?? ""}`.trim() || r.linkedin_url || "—";
     if (!r.linkedin_url) { skipped.push({ name, reason: "nema LinkedIn URL" }); continue; }
-    if (requiresPersonalization && !String(r.personalization ?? "").trim()) {
-      skipped.push({ name, reason: "nema personalizaciju" });
+    const rendered = (r.rendered_messages ?? {}) as Record<string, string>;
+    const missingStep = requiredSteps.find((s) => !String(rendered[String(s.step_order)] ?? "").trim());
+    if (missingStep) {
+      skipped.push({ name, reason: `nema poruku (${missingStep.label})` });
       continue;
     }
     valid.push(m);
@@ -79,15 +81,24 @@ export async function POST(
 
   if (valid.length === 0) {
     return NextResponse.json(
-      { pushed: 0, skipped, error: "Svi approved leadovi su preskočeni — fali LinkedIn URL ili personalizacija." },
+      { pushed: 0, skipped, error: "Svi approved leadovi su preskočeni — fali LinkedIn URL ili poruka." },
       { status: 400 }
     );
   }
 
-  // Build HeyReach payload
-  // HeyReach expects batches; we send all at once (max 1000 per call)
+  // Build HeyReach payload. Each sequence step → a custom variable
+  // ({{message_1}}, {{connection_note}}…) carrying the rendered per-lead text.
+  // HeyReach expects batches; we send all at once (max 1000 per call).
   const leadsWithLinkedInAccountIds = valid.map((m) => {
     const r = m.raw as any;
+    const rendered = (r.rendered_messages ?? {}) as Record<string, string>;
+    const customVariables = requiredSteps
+      .map((s) => ({ name: s.variableName, value: String(rendered[String(s.step_order)] ?? "") }))
+      .filter((v) => v.value.trim());
+    // Back-compat: keep legacy {personalization} if present and no rendered messages.
+    if (customVariables.length === 0 && r.personalization) {
+      customVariables.push({ name: "personalization", value: String(r.personalization) });
+    }
     return {
       lead: {
         firstName: r.first_name ?? r.full_name?.split(" ")[0] ?? "",
@@ -96,9 +107,7 @@ export async function POST(
         email: r.email ?? "",
         companyName: r.company_name ?? "",
         position: r.title ?? "",
-        customVariables: r.personalization
-          ? [{ name: "personalization", value: String(r.personalization) }]
-          : [],
+        customVariables,
       },
       linkedInAccountId: heyreachAccountId,
     };

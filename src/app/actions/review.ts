@@ -39,6 +39,30 @@ export async function updateMemberPersonalization(
   revalidatePath(`/clients/${clientId}/review`);
 }
 
+// Save one sequence step's full rendered message for a lead.
+export async function updateMemberMessage(
+  memberId: string,
+  stepOrder: number,
+  text: string,
+  clientId: string
+) {
+  await requireRole("operator");
+  const supabase = await createClient();
+  const { data: member } = await supabase
+    .from("audience_members")
+    .select("raw")
+    .eq("id", memberId)
+    .maybeSingle();
+  if (!member) return;
+  const raw = (member.raw as Record<string, any>) ?? {};
+  const rendered_messages = { ...(raw.rendered_messages ?? {}), [String(stepOrder)]: text };
+  await supabase
+    .from("audience_members")
+    .update({ raw: { ...raw, rendered_messages } })
+    .eq("id", memberId);
+  revalidatePath(`/clients/${clientId}/review`);
+}
+
 export async function bulkSetReviewStatus(
   memberIds: string[],
   status: "approved" | "rejected",
