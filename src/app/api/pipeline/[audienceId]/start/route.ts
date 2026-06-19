@@ -12,12 +12,23 @@ import {
 
 export const maxDuration = 300; // 5 min max (Vercel hobby = 60s; use pro for longer)
 
+const DEFAULT_BATCH = 3; // small batch keeps each request well under the limit
+
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ audienceId: string }> }
 ) {
   const { audienceId } = await params;
   const supabase = await createClient();
+
+  // How many leads to process this request (client drives the loop).
+  let batchLimit = DEFAULT_BATCH;
+  try {
+    const body = await req.json();
+    if (body && Number.isFinite(Number(body.limit))) {
+      batchLimit = Math.max(1, Math.min(10, Number(body.limit)));
+    }
+  } catch { /* no body — use default */ }
 
   // Load audience + ICP + sender profile (for Owner field)
   const { data: audience, error: audErr } = await supabase
@@ -33,23 +44,34 @@ export async function POST(
   const icp = audience.icp_profiles as any;
   const owner = (audience as any).sender_profiles?.full_name ?? null;
 
-  // Atomically claim pending members (concurrency guard — see migration 0011).
-  // A second concurrent invocation (e.g. gateway retry) gets a disjoint set or
-  // none, so the same lead is never enriched/scored twice.
+  // Helper: count rows still pending for this audience (drives the client loop).
+  async function countPending(): Promise<number> {
+    const { count } = await supabase
+      .from("audience_members")
+      .select("id", { count: "exact", head: true })
+      .eq("audience_id", audienceId)
+      .eq("qualify_status", "pending");
+    return count ?? 0;
+  }
+
+  // Atomically claim a small BATCH of pending members (see migrations 0011/0012).
+  // FOR UPDATE SKIP LOCKED means concurrent callers never grab the same row, so
+  // a lead is never enriched/scored twice. The client calls this repeatedly.
   const { data: members, error: memErr } = await supabase
-    .rpc("claim_pending_members", { p_audience_id: audienceId });
+    .rpc("claim_pending_members", { p_audience_id: audienceId, p_limit: batchLimit });
 
   if (memErr) return NextResponse.json({ error: memErr.message }, { status: 500 });
   if (!members || members.length === 0) {
-    // Nothing left to claim — report the audience's actual cumulative counts
-    // so the UI shows real totals instead of 0/0/0 on an already-processed run.
+    // Nothing claimable right now — report cumulative counts + remaining pending
+    // so the UI shows real totals (and the loop knows whether to keep going).
     const { data: all } = await supabase
       .from("audience_members")
       .select("qualify_status")
       .eq("audience_id", audienceId);
     const rows = all ?? [];
     return NextResponse.json({
-      message: "No pending members.",
+      batch: 0,
+      remaining: rows.filter((r) => r.qualify_status === "pending").length,
       qualified: rows.filter((r) => r.qualify_status === "qualified").length,
       disqualified: rows.filter((r) => r.qualify_status === "disqualified").length,
       noData: rows.filter((r) => r.qualify_status === "not_able_to_qualify").length,
@@ -247,17 +269,31 @@ export async function POST(
     }
   }
 
-  // Discord notification when done
-  const discordUrl = process.env.DISCORD_WEBHOOK_URL;
-  if (discordUrl) {
-    await fetch(discordUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        content: `✅ **Pipeline završen** — Audience: ${audience.name}\nQualified: **${qualified}** · Disqualified: ${disqualified} · No data: ${noData}`,
-      }),
-    }).catch(() => {});
+  const remaining = await countPending();
+
+  // Discord notification only when the whole audience is done (not per batch),
+  // with the audience's true cumulative totals.
+  if (remaining === 0) {
+    const discordUrl = process.env.DISCORD_WEBHOOK_URL;
+    if (discordUrl) {
+      const { data: all } = await supabase
+        .from("audience_members")
+        .select("qualify_status")
+        .eq("audience_id", audienceId);
+      const rows = all ?? [];
+      const totQ = rows.filter((r) => r.qualify_status === "qualified").length;
+      const totD = rows.filter((r) => r.qualify_status === "disqualified").length;
+      const totN = rows.filter((r) => r.qualify_status === "not_able_to_qualify").length;
+      await fetch(discordUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: `✅ **Pipeline završen** — Audience: ${audience.name}\nQualified: **${totQ}** · Disqualified: ${totD} · No data: ${totN}`,
+        }),
+      }).catch(() => {});
+    }
   }
 
-  return NextResponse.json({ qualified, disqualified, noData });
+  // Per-batch counts + remaining pending so the client loop can continue.
+  return NextResponse.json({ batch: members.length, qualified, disqualified, noData, remaining });
 }

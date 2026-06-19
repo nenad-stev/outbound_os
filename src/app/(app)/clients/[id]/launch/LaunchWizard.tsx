@@ -151,9 +151,9 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
   // Step 3 — pipeline
   const [pipeResult, setPipeResult] = useState<{ qualified: number; disqualified: number; noData: number } | null>(null);
   const [progress, setProgress] = useState<{ total: number; processed: number } | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const cancelRef = useRef(false);
 
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+  useEffect(() => () => { cancelRef.current = true; }, []);
 
   const resolvedCampaign = campaigns.find((c) => c.id === campaignId);
   const resolvedSender = senders.find((s) => s.id === senderId);
@@ -286,78 +286,92 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
     try { return JSON.parse(text); } catch { return { __text: text }; }
   }
 
+  async function readProgress(): Promise<{ total: number; processed: number; pending: number; qualified: number; disqualified: number; noData: number } | null> {
+    const r = await fetch(`/api/pipeline/${audienceId}/progress`, { cache: "no-store" }).catch(() => null);
+    if (!r) return null;
+    const d = await readJsonSafe(r);
+    if (!d || typeof d.total !== "number") return null;
+    return {
+      total: d.total, processed: d.processed ?? 0, pending: d.pending ?? 0,
+      qualified: d.qualified ?? 0, disqualified: d.disqualified ?? 0, noData: d.noData ?? 0,
+    };
+  }
+
+  // Drive the pipeline in small batches. Each /start call processes a few leads
+  // and returns quickly (no gateway timeout, no plain-text 504 → no JSON crash),
+  // updating the progress bar after every batch until nothing is pending.
   async function runPipeline() {
     setError(null);
-    setProgress({ total: audienceCount ?? 0, processed: 0 }); // show the bar instantly
     setBusy(true);
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-    let settled = false;
-    let startError: string | null = null;
-    const stop = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
-    const finishOk = (q: number, d: number, n: number) => {
-      if (settled) return;
-      settled = true; stop();
-      setPipeResult({ qualified: q, disqualified: d, noData: n });
-      setBusy(false);
-    };
-    const finishErr = (msg: string) => {
-      if (settled) return;
-      settled = true; stop();
-      setError(msg);
-      setBusy(false);
-    };
+    // Seed the bar from current state
+    const seed = await readProgress();
+    setProgress(seed ? { total: seed.total, processed: seed.processed } : { total: audienceCount ?? 0, processed: 0 });
 
-    // Fire the work. The serverless function keeps running even if the gateway
-    // drops our connection, so a rejection here is NOT fatal — polling owns
-    // completion. We only remember a server-side error to show if polling stalls.
-    fetch(`/api/pipeline/${audienceId}/start`, { method: "POST" })
-      .then(async (res) => {
+    let stuck = 0;
+    try {
+      while (true) {
+        if (cancelRef.current) return;
+
+        const res = await fetch(`/api/pipeline/${audienceId}/start`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ limit: 3 }),
+        }).catch(() => null);
+
+        // Network drop / batch timeout — already-processed leads are saved.
+        if (!res) {
+          stuck++;
+          if (stuck > 5) throw new Error('Mreža je prekinuta tokom obrade. Već obrađeni leadovi su sačuvani — klikni "Pokreni obradu" ponovo da nastaviš.');
+          await sleep(4000);
+          continue;
+        }
+
+        const body = await readJsonSafe(res);
         if (!res.ok) {
-          const body = await readJsonSafe(res);
           const raw = body?.error ?? body?.__text ?? `HTTP ${res.status}`;
-          startError = `Server greška tokom obrade: ${String(raw).slice(0, 200)}`;
+          throw new Error(`Server greška tokom obrade: ${String(raw).slice(0, 200)}`);
         }
-      })
-      .catch(() => { /* connection dropped — polling detects completion */ });
 
-    // Poll progress until every member has a final status (pending === 0).
-    let stalls = 0;
-    let lastProcessed = -1;
-    const poll = async () => {
-      const r = await fetch(`/api/pipeline/${audienceId}/progress`, { cache: "no-store" }).catch(() => null);
-      if (!r) return;
-      const d = await readJsonSafe(r);
-      if (!d || typeof d.total !== "number") return;
+        const p = await readProgress();
+        if (p) setProgress({ total: p.total, processed: p.processed });
 
-      const total = d.total as number;
-      const processed = d.processed ?? 0;
-      setProgress({ total, processed });
+        const remaining = body?.remaining ?? p?.pending ?? 0;
+        const batch = body?.batch ?? 0;
 
-      if (total > 0 && (d.pending ?? 0) === 0) {
-        finishOk(d.qualified ?? 0, d.disqualified ?? 0, d.noData ?? 0);
-        return;
-      }
-
-      // Stall detection: no movement for ~40s likely means a server timeout
-      // (Vercel hobby caps functions at 60s) — or the start call errored.
-      if (processed === lastProcessed) {
-        stalls++;
-        if (stalls >= 20 && !settled) {
-          finishErr(
-            startError ??
-            `Obrada je stala na ${processed}/${total} leadova (verovatno serverski timeout). ` +
-            `Već obrađeni su sačuvani — klikni "Pokreni obradu" ponovo da nastaviš sa preostalima.`
-          );
+        // Done
+        if (remaining === 0) {
+          const fp = p ?? (await readProgress());
+          setPipeResult({
+            qualified: fp?.qualified ?? 0,
+            disqualified: fp?.disqualified ?? 0,
+            noData: fp?.noData ?? 0,
+          });
+          break;
         }
-      } else {
-        stalls = 0;
-        lastProcessed = processed;
-      }
-    };
 
-    await poll(); // immediate first read
-    if (!settled) pollRef.current = setInterval(poll, 2000);
+        // Nothing claimed but rows still pending → a previous batch is still
+        // within its 90s lock window. Wait and retry a few times.
+        if (batch === 0) {
+          stuck++;
+          if (stuck > 10) {
+            throw new Error(
+              `Obrađeno ${p?.processed ?? 0}/${p?.total ?? 0}. Ostalo ${remaining} leadova je privremeno zaključano — ` +
+              `sačekaj ~1 min i klikni "Pokreni obradu" ponovo.`
+            );
+          }
+          await sleep(5000);
+          continue;
+        }
+
+        stuck = 0; // progress made
+      }
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
