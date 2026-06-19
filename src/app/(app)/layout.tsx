@@ -19,11 +19,11 @@ const NAV = [
   },
 ];
 
-// Deploy identity — Vercel injects these system env vars on every build, so
-// the badge changes with each push. Lets us confirm at a glance which version
-// is live ("aha, my push deployed").
-const COMMIT_SHA = (process.env.VERCEL_GIT_COMMIT_SHA ?? "").slice(0, 7) || "local";
-const COMMIT_MSG = (process.env.VERCEL_GIT_COMMIT_MESSAGE ?? "").split("\n")[0];
+// Deploy identity — baked at build time in next.config.ts (works on Vercel and
+// locally). Lets us confirm at a glance which version is live ("aha, my push
+// deployed").
+const COMMIT_SHA = (process.env.NEXT_PUBLIC_COMMIT_SHA ?? "").slice(0, 7) || "local";
+const COMMIT_MSG = (process.env.NEXT_PUBLIC_COMMIT_MSG ?? "").split("\n")[0];
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await requireUser();
