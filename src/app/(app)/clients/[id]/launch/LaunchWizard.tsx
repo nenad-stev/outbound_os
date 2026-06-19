@@ -106,11 +106,16 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
   const [icpId, setIcpId] = useState<string>(icps.find((i) => i.is_default)?.id ?? icps[0]?.id ?? "");
 
   // Step 2 — audience
-  const [audMode, setAudMode] = useState<"csv" | "apollo" | "existing">("csv");
+  const [audMode, setAudMode] = useState<"apollo" | "csv" | "heyreach" | "existing">("apollo");
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [existingAudienceId, setExistingAudienceId] = useState(audiences[0]?.id ?? "");
   const [audienceId, setAudienceId] = useState<string>("");
   const [audienceCount, setAudienceCount] = useState<number | null>(null);
+  // HeyReach import tab
+  const [hrCampaignId, setHrCampaignId] = useState("");
+  const [hrAudienceName, setHrAudienceName] = useState("");
+  const [hrBusy, setHrBusy] = useState(false);
+  const [hrError, setHrError] = useState<string | null>(null);
 
   // Step 3 — pipeline
   const [pipeResult, setPipeResult] = useState<{ qualified: number; disqualified: number; noData: number } | null>(null);
@@ -170,10 +175,43 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
     setAudienceCount(importedTotal);
   }
 
+  async function importFromHeyReach() {
+    setHrError(null);
+    if (!hrCampaignId.trim()) { setHrError("Unesi HeyReach campaign ID."); return; }
+    setHrBusy(true);
+    try {
+      const res = await fetch("/api/heyreach/audience-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          heyreach_campaign_id: hrCampaignId.trim(),
+          audience_name: hrAudienceName.trim() || `HeyReach #${hrCampaignId.trim()}`,
+          client_id: clientId,
+          campaign_id: campaignId,
+          sender_profile_id: senderId || null,
+          icp_profile_id: icpId,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setHrError(data.error ?? "Import nije uspeo."); return; }
+      setAudienceId(data.audience_id);
+      setAudienceCount(data.count);
+    } catch (e: any) {
+      setHrError(e.message);
+    } finally {
+      setHrBusy(false);
+    }
+  }
+
   async function submitStep2() {
     setError(null);
     if (audMode === "apollo") {
       if (!audienceId) { setError("Importuj bar jedan Apollo search pre nego nastaviš."); return; }
+      setStep(3);
+      return;
+    }
+    if (audMode === "heyreach") {
+      if (!audienceId) { setError("Importuj HeyReach kampanju pre nego nastaviš."); return; }
       setStep(3);
       return;
     }
@@ -371,18 +409,18 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
             Uvezi nove leadove (CSV ili Apollo) ili izaberi već importovanu publiku.
           </p>
 
-          <div style={{ display: "flex", gap: "8px", marginBottom: "18px" }}>
-            {(["csv", "apollo", "existing"] as const).map((m) => (
-              <button key={m} onClick={() => setAudMode(m)}
+          <div style={{ display: "flex", gap: "8px", marginBottom: "18px", flexWrap: "wrap" }}>
+            {(["apollo", "csv", "heyreach", "existing"] as const).map((m) => (
+              <button key={m} onClick={() => { setAudMode(m); setError(null); setHrError(null); setAudienceId(""); setAudienceCount(null); }}
                 disabled={m === "existing" && audiences.length === 0}
                 style={{
-                  flex: 1, borderRadius: "10px", padding: "10px", fontSize: "13px", fontWeight: 600, cursor: "pointer",
+                  flex: 1, minWidth: "130px", borderRadius: "10px", padding: "10px", fontSize: "13px", fontWeight: 600, cursor: "pointer",
                   backgroundColor: audMode === m ? "#FFCC00" : "rgba(255,255,255,0.05)",
                   color: audMode === m ? "#272727" : "#BDBDBD",
                   border: audMode === m ? "1px solid #FFCC00" : "1px solid rgba(255,255,255,0.1)",
                   opacity: m === "existing" && audiences.length === 0 ? 0.4 : 1,
                 }}>
-                {m === "csv" ? "Upload CSV" : m === "apollo" ? "Apollo search" : "Postojeća publika"}
+                {m === "apollo" ? "Apollo search" : m === "csv" ? "Upload CSV" : m === "heyreach" ? "HeyReach" : "Postojeća publika"}
               </button>
             ))}
           </div>
@@ -393,6 +431,62 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
               <input type="file" accept=".csv" onChange={(e) => setCsvFile(e.target.files?.[0] ?? null)}
                 style={{ ...inputStyle, padding: "8px" }} />
               {csvFile && <p style={{ fontSize: "12px", color: "#86EFAC", marginTop: "8px" }}>✓ {csvFile.name}</p>}
+            </div>
+          )}
+
+          {audMode === "heyreach" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+              <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)", margin: 0 }}>
+                Unesi numerički ID HeyReach kampanje iz koje želiš da uvezeh leadove. Leadovi se importuju kao nova publika i prolaze kroz dedup + pipeline.
+              </p>
+              {audienceId ? (
+                <div style={{ padding: "12px 14px", backgroundColor: "rgba(134,239,172,0.08)", border: "1px solid rgba(134,239,172,0.2)", borderRadius: "10px" }}>
+                  <p style={{ fontSize: "13px", color: "#86EFAC", margin: 0, fontWeight: 600 }}>
+                    ✓ Importovano {audienceCount ?? 0} leadova iz HeyReach kampanje #{hrCampaignId}
+                  </p>
+                  <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.4)", marginTop: "4px" }}>Možeš nastaviti na obradu.</p>
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: "flex", gap: "12px" }}>
+                    <div style={{ flex: 1 }}>
+                      <label style={labelStyle}>HeyReach Campaign ID</label>
+                      <input
+                        value={hrCampaignId}
+                        onChange={(e) => setHrCampaignId(e.target.value)}
+                        placeholder="npr. 98765"
+                        style={inputStyle}
+                      />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <label style={labelStyle}>Naziv publike <span style={{ fontWeight: 400, color: "rgba(255,255,255,0.3)" }}>(opciono)</span></label>
+                      <input
+                        value={hrAudienceName}
+                        onChange={(e) => setHrAudienceName(e.target.value)}
+                        placeholder={`HeyReach #${hrCampaignId || "…"}`}
+                        style={inputStyle}
+                      />
+                    </div>
+                  </div>
+                  {hrError && (
+                    <p style={{ fontSize: "13px", color: "#F87171", padding: "8px 12px", backgroundColor: "rgba(248,113,113,0.08)", borderRadius: "8px", margin: 0 }}>
+                      {hrError}
+                    </p>
+                  )}
+                  <button
+                    onClick={importFromHeyReach}
+                    disabled={hrBusy || !hrCampaignId.trim()}
+                    style={{
+                      alignSelf: "flex-start", backgroundColor: "#A5B4FC", color: "#272727", fontWeight: 600,
+                      borderRadius: "10px", padding: "9px 20px", fontSize: "13px", border: "none",
+                      cursor: hrBusy || !hrCampaignId.trim() ? "not-allowed" : "pointer",
+                      opacity: hrBusy || !hrCampaignId.trim() ? 0.5 : 1,
+                    }}
+                  >
+                    {hrBusy ? "Uvozim iz HeyReach-a…" : "Uvezi iz HeyReach-a"}
+                  </button>
+                </>
+              )}
             </div>
           )}
 
@@ -434,8 +528,8 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
 
           <Err msg={error} />
           <NavButtons onBack={() => setStep(1)} onNext={submitStep2}
-            nextLabel={audMode === "apollo" ? "Dalje: obrada →" : "Uvezi i nastavi →"}
-            nextDisabled={audMode === "apollo" && !audienceId} busy={busy} />
+            nextLabel={audMode === "apollo" || audMode === "heyreach" ? "Dalje: obrada →" : "Uvezi i nastavi →"}
+            nextDisabled={(audMode === "apollo" || audMode === "heyreach") && !audienceId} busy={busy} />
         </div>
       )}
 
