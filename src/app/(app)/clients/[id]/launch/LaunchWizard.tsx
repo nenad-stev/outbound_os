@@ -341,17 +341,28 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
         await pollWhileBusy;
 
         // Network drop / batch timeout — already-processed leads are saved.
+        // Don't abort the whole run: retry. The claim's stale window frees any
+        // rows a crashed batch had locked so they get re-processed.
         if (!res) {
           stuck++;
-          if (stuck > 5) throw new Error('Mreža je prekinuta tokom obrade. Već obrađeni leadovi su sačuvani — klikni "Pokreni obradu" ponovo da nastaviš.');
+          if (stuck > 30) throw new Error('Mreža je prekinuta tokom obrade. Već obrađeni leadovi su sačuvani — klikni "Pokreni obradu" ponovo da nastaviš.');
           await sleep(4000);
           continue;
         }
 
         const body = await readJsonSafe(res);
+        // A single batch failing server-side (BrightData / gateway timeout →
+        // 5xx) must NOT kill the whole run — the previous behavior stranded the
+        // remaining leads as "pending". Retry instead; processed leads are saved
+        // and locked rows free up after the claim's stale window.
         if (!res.ok) {
-          const raw = body?.error ?? body?.__text ?? `HTTP ${res.status}`;
-          throw new Error(`Server greška tokom obrade: ${String(raw).slice(0, 200)}`);
+          stuck++;
+          if (stuck > 30) {
+            const raw = body?.error ?? body?.__text ?? `HTTP ${res.status}`;
+            throw new Error(`Obrada zaustavljena posle više grešaka: ${String(raw).slice(0, 160)}. Klikni "Pokreni obradu" ponovo da nastaviš.`);
+          }
+          await sleep(5000);
+          continue;
         }
 
         const p = await readProgress();
@@ -391,10 +402,11 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
         }
 
         // Nothing claimed but rows still pending → a previous batch is still
-        // within its 90s lock window. Wait and retry a few times.
+        // within its 90s lock window. Wait and retry patiently (90s window ÷ 5s
+        // ≈ 18 tries, so allow well past that before giving up).
         if (batch === 0) {
           stuck++;
-          if (stuck > 10) {
+          if (stuck > 30) {
             throw new Error(
               `Obrađeno ${p?.processed ?? 0}/${p?.total ?? 0}. Ostalo ${remaining} leadova je privremeno zaključano — ` +
               `sačekaj ~1 min i klikni "Pokreni obradu" ponovo.`
