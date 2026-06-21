@@ -8,6 +8,8 @@ export interface QualifyResult {
   content: string | null;
 }
 
+import { anthropicText } from "@/lib/anthropic";
+
 const FIRECRAWL_BASE = "https://api.firecrawl.dev/v1";
 
 async function scrapeText(url: string): Promise<string | null> {
@@ -47,25 +49,17 @@ ${content}
 
 Reply with JSON only: {"qualified": true/false, "reason": "one sentence explanation"}`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": anthropicKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
+  const text = await anthropicText(
+    {
       model: process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001",
       max_tokens: 150,
       messages: [{ role: "user", content: prompt }],
-    }),
-    signal: AbortSignal.timeout(30_000),
-  });
+    },
+    anthropicKey
+  );
 
-  if (!res.ok) return { qualified: false, reason: "AI qualification failed." };
+  if (text == null) return { qualified: false, reason: "AI qualification failed." };
 
-  const json = await res.json();
-  const text: string = json?.content?.[0]?.text ?? "{}";
   try {
     const parsed = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
     return {

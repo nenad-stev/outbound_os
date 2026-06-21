@@ -12,7 +12,24 @@ import {
 
 export const maxDuration = 300; // 5 min max (Vercel hobby = 60s; use pro for longer)
 
-const DEFAULT_BATCH = 3; // small batch keeps each request well under the limit
+const DEFAULT_BATCH = 6;        // URLs per BrightData call (it parallelizes internally)
+const IN_BATCH_CONCURRENCY = 6; // leads qualified/scored in parallel within a batch
+
+// Run an async fn over items with a fixed concurrency ceiling.
+async function mapWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>
+): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const idx = cursor++;
+      await fn(items[idx]);
+    }
+  });
+  await Promise.all(workers);
+}
 
 export async function POST(
   req: NextRequest,
@@ -105,12 +122,15 @@ export async function POST(
     scrapeLinkedInCompanies(companyUrls),
   ]);
 
-  // Process sequentially to avoid rate limits
+  // Process members in PARALLEL (bounded). The per-lead work (Firecrawl scrape
+  // + 2 Anthropic calls) dominates wall time, so running them concurrently —
+  // instead of the old sequential loop — is the single biggest speedup. Node's
+  // event loop is single-threaded, so the ++ counters need no locking.
   let qualified = 0;
   let disqualified = 0;
   let noData = 0;
 
-  for (const member of members) {
+  async function processMember(member: any) {
     const rawBase = member.raw as any;
 
     // Skip leads already contacted in a previous campaign (any external tool)
@@ -122,7 +142,7 @@ export async function POST(
         .from("audience_members")
         .update({ qualify_status: "disqualified", qualify_source: "none", qualify_reason: "Već kontaktirano – pronađeno u istoriji kontakta." })
         .eq("id", member.id);
-      continue;
+      return;
     }
 
     // Build identity + LinkedIn enrichment from BrightData result
@@ -179,7 +199,7 @@ export async function POST(
             },
           })
           .eq("id", member.id);
-        continue;
+        return;
       }
     }
 
@@ -224,7 +244,7 @@ export async function POST(
             raw: { ...raw, provenance },
           })
           .eq("id", member.id);
-        continue;
+        return;
       }
 
       if (!qualResult.qualified) {
@@ -238,7 +258,7 @@ export async function POST(
             raw: { ...raw, provenance },
           })
           .eq("id", member.id);
-        continue;
+        return;
       }
 
       // Step 2: Score qualified leads
@@ -305,6 +325,8 @@ export async function POST(
       noData++;
     }
   }
+
+  await mapWithConcurrency(members as any[], IN_BATCH_CONCURRENCY, processMember);
 
   const remaining = await countPending();
 

@@ -1,6 +1,7 @@
 // AI scoring: takes qualified lead + ICP → fit score 1-100, priority tier, explanation, personalization sentence
 
 import type { DecisionMakerSignal } from "@/lib/enrichment";
+import { anthropicText } from "@/lib/anthropic";
 
 export interface ScoreResult {
   fit_score: number;
@@ -92,30 +93,21 @@ Return JSON only:
 Tiers: tier_1=80-100, tier_2=60-79, tier_3=40-59, tier_4=0-39
 Keep linkedin_fit_signals and linkedin_red_flags to max 3 items each, empty arrays if none.`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": anthropicKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
+  const text = await anthropicText(
+    {
       model: process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001",
       max_tokens: 500,
       messages: [{ role: "user", content: prompt }],
-    }),
-    signal: AbortSignal.timeout(30_000),
-  });
+    },
+    anthropicKey
+  );
 
-  if (!res.ok) {
+  if (text == null) {
     return {
       fit_score: 50, priority: "tier_3", explanation: "Scoring API error.", personalization: "",
       decision_maker_signal: "unknown", role_fit_notes: null, linkedin_fit_signals: [], linkedin_red_flags: [],
     };
   }
-
-  const json = await res.json();
-  const text: string = json?.content?.[0]?.text ?? "{}";
 
   try {
     const parsed = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? "{}");

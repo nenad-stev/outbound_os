@@ -299,9 +299,13 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
     };
   }
 
-  // Drive the pipeline in small batches. Each /start call processes a few leads
-  // and returns quickly (no gateway timeout, no plain-text 504 → no JSON crash),
-  // updating the progress bar after every batch until nothing is pending.
+  // Drive the pipeline as fast as safely possible: run several batch loops
+  // CONCURRENTLY. Each /start call claims a disjoint set of pending leads
+  // (FOR UPDATE SKIP LOCKED), so N workers process N batches in parallel.
+  // A single independent poller keeps the progress bar moving the whole time.
+  const PIPELINE_WORKERS = 2; // parallel batch loops
+  const PIPELINE_BATCH = 6;   // leads claimed per /start call
+
   async function runPipeline() {
     setError(null);
     setMsgGenPhase("idle");
@@ -313,114 +317,114 @@ export default function LaunchWizard({ clientId, campaigns, senders, icps, audie
     const seed = await readProgress();
     setProgress(seed ? { total: seed.total, processed: seed.processed } : { total: audienceCount ?? 0, processed: 0 });
 
-    let stuck = 0;
-    try {
-      while (true) {
+    let done = false;
+    let finalized = false;
+    let fatal: Error | null = null;
+
+    // One poller updates the bar every 2s regardless of how the workers batch.
+    const poller = (async () => {
+      while (!done && !cancelRef.current) {
+        await sleep(2000);
+        const p = await readProgress();
+        if (p) setProgress({ total: p.total, processed: p.processed });
+      }
+    })();
+
+    // After everything is processed, snapshot results + auto-generate messages.
+    async function finalize() {
+      if (finalized) return;
+      finalized = true;
+      const fp = await readProgress();
+      setPipeResult({
+        qualified: fp?.qualified ?? 0,
+        disqualified: fp?.disqualified ?? 0,
+        noData: fp?.noData ?? 0,
+      });
+      if ((fp?.qualified ?? 0) > 0) {
+        setMsgGenPhase("running");
+        try {
+          const mgRes = await fetch(`/api/review/${audienceId}/regenerate-messages`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ scope: "all" }),
+          }).catch(() => null);
+          if (mgRes) {
+            const mgBody = await readJsonSafe(mgRes);
+            setMsgGenResult({ updated: mgBody?.updated ?? 0, failed: mgBody?.failed ?? 0 });
+          }
+          setMsgGenPhase("done");
+        } catch {
+          setMsgGenPhase("error");
+        }
+      }
+    }
+
+    // A worker keeps claiming + processing batches until nothing is pending.
+    // Two counters: failStuck for hard failures (give up sooner), lockWait for
+    // "rows temporarily locked by another worker" (wait out the claim window,
+    // which is ~240s — so be patient well past it before giving up).
+    async function worker() {
+      let failStuck = 0;
+      let lockWait = 0;
+      while (!done) {
         if (cancelRef.current) return;
 
-        // Fire the batch request, but poll progress every 2s while it's in flight
-        // so the user sees the bar move during long BrightData scrapes.
-        let batchSettled = false;
-        const batchPromise = fetch(`/api/pipeline/${audienceId}/start`, {
+        const res = await fetch(`/api/pipeline/${audienceId}/start`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ limit: 3 }),
+          body: JSON.stringify({ limit: PIPELINE_BATCH }),
         }).catch(() => null);
 
-        const pollWhileBusy = (async () => {
-          while (!batchSettled) {
-            await sleep(2000);
-            if (batchSettled || cancelRef.current) break;
-            const p = await readProgress();
-            if (p) setProgress({ total: p.total, processed: p.processed });
-          }
-        })();
-
-        const res = await batchPromise;
-        batchSettled = true;
-        await pollWhileBusy;
-
-        // Network drop / batch timeout — already-processed leads are saved.
-        // Don't abort the whole run: retry. The claim's stale window frees any
-        // rows a crashed batch had locked so they get re-processed.
+        // Network drop / batch timeout — retry; processed leads are saved and
+        // the claim's stale window frees any rows a crashed batch had locked.
         if (!res) {
-          stuck++;
-          if (stuck > 30) throw new Error('Mreža je prekinuta tokom obrade. Već obrađeni leadovi su sačuvani — klikni "Pokreni obradu" ponovo da nastaviš.');
+          if (++failStuck > 30) { fatal = new Error('Mreža je prekinuta tokom obrade. Već obrađeni leadovi su sačuvani — klikni "Pokreni obradu" ponovo da nastaviš.'); done = true; return; }
           await sleep(4000);
           continue;
         }
 
         const body = await readJsonSafe(res);
-        // A single batch failing server-side (BrightData / gateway timeout →
-        // 5xx) must NOT kill the whole run — the previous behavior stranded the
-        // remaining leads as "pending". Retry instead; processed leads are saved
-        // and locked rows free up after the claim's stale window.
+        // A single batch failing server-side (5xx) must not kill the run.
         if (!res.ok) {
-          stuck++;
-          if (stuck > 30) {
+          if (++failStuck > 30) {
             const raw = body?.error ?? body?.__text ?? `HTTP ${res.status}`;
-            throw new Error(`Obrada zaustavljena posle više grešaka: ${String(raw).slice(0, 160)}. Klikni "Pokreni obradu" ponovo da nastaviš.`);
+            fatal = new Error(`Obrada zaustavljena posle više grešaka: ${String(raw).slice(0, 160)}. Klikni "Pokreni obradu" ponovo da nastaviš.`);
+            done = true; return;
           }
           await sleep(5000);
           continue;
         }
+        failStuck = 0;
 
-        const p = await readProgress();
-        if (p) setProgress({ total: p.total, processed: p.processed });
-
-        const remaining = body?.remaining ?? p?.pending ?? 0;
+        const remaining = body?.remaining ?? 0;
         const batch = body?.batch ?? 0;
 
-        // Done
-        if (remaining === 0) {
-          const fp = p ?? (await readProgress());
-          setPipeResult({
-            qualified: fp?.qualified ?? 0,
-            disqualified: fp?.disqualified ?? 0,
-            noData: fp?.noData ?? 0,
-          });
-          // Auto-generate messages for all qualified leads before handing off
-          // to Review Queue, so they arrive with messages ready.
-          if ((fp?.qualified ?? 0) > 0) {
-            setMsgGenPhase("running");
-            try {
-              const mgRes = await fetch(`/api/review/${audienceId}/regenerate-messages`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ scope: "all" }),
-              }).catch(() => null);
-              if (mgRes) {
-                const mgBody = await readJsonSafe(mgRes);
-                setMsgGenResult({ updated: mgBody?.updated ?? 0, failed: mgBody?.failed ?? 0 });
-              }
-              setMsgGenPhase("done");
-            } catch {
-              setMsgGenPhase("error");
-            }
-          }
-          break;
-        }
+        if (remaining === 0) { done = true; return; }
 
-        // Nothing claimed but rows still pending → a previous batch is still
-        // within its 90s lock window. Wait and retry patiently (90s window ÷ 5s
-        // ≈ 18 tries, so allow well past that before giving up).
+        // Nothing claimable but rows still pending → another worker's batch holds
+        // them within the claim lock window. Wait it out (60×5s = 300s > window).
         if (batch === 0) {
-          stuck++;
-          if (stuck > 30) {
-            throw new Error(
-              `Obrađeno ${p?.processed ?? 0}/${p?.total ?? 0}. Ostalo ${remaining} leadova je privremeno zaključano — ` +
-              `sačekaj ~1 min i klikni "Pokreni obradu" ponovo.`
-            );
+          if (++lockWait > 60) {
+            fatal = new Error(`Ostalo ${remaining} leadova je privremeno zaključano — sačekaj ~1 min i klikni "Pokreni obradu" ponovo.`);
+            done = true; return;
           }
           await sleep(5000);
           continue;
         }
-
-        stuck = 0; // progress made
+        lockWait = 0; // progress made
       }
+    }
+
+    try {
+      await Promise.all(Array.from({ length: PIPELINE_WORKERS }, () => worker()));
+      done = true;
+      await poller;
+      if (fatal) throw fatal;
+      if (!cancelRef.current) await finalize();
     } catch (e: any) {
       setError(e.message);
     } finally {
+      done = true;
       setBusy(false);
     }
   }
